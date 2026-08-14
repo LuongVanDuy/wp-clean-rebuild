@@ -12,6 +12,7 @@ from .backup import verify_manifest, write_manifest
 from .remote_backup import backup_wordpress_ftp
 from .scanners import scan_sql as run_sql_scan
 from .scanners import scan_uploads as run_upload_scan
+from .site_config import load_site_profile
 from .transport import FTPConfig, FTPTransport
 from .ui import show_findings
 
@@ -27,6 +28,22 @@ def _human_bytes(value: float) -> str:
             return f"{size:.2f} {unit}"
         size /= 1024
     return f"{size:.2f} TiB"
+
+
+def _profile_transport(config_path: Path) -> tuple[FTPTransport, str]:
+    profile = load_site_profile(config_path)
+    password = profile.password or os.getenv("WPCLEAN_FTP_PASSWORD") or typer.prompt("FTP password", hide_input=True)
+    cfg = FTPConfig(
+        host=profile.host,
+        username=profile.username,
+        password=password,
+        port=profile.port,
+        tls=profile.use_tls,
+        passive=profile.passive,
+        workers=profile.workers,
+        block_size=profile.block_mb * 1024 * 1024,
+    )
+    return FTPTransport(cfg), profile.remote_path
 
 
 @app.command()
@@ -99,6 +116,23 @@ def ftp_test(
         console.print("[yellow]Warning: plain FTP sends credentials without transport encryption.[/yellow]")
 
 
+@app.command("ftp-test-config")
+def ftp_test_config(
+    config: Path = typer.Argument(..., exists=True, dir_okay=False),
+) -> None:
+    """Test a JSON site profile using host/username/password/protocol/port/remotePath."""
+    profile = load_site_profile(config)
+    transport, remote_root = _profile_transport(config)
+    pwd = transport.test_connection()
+    mode = "FTPS" if profile.use_tls else "FTP"
+    console.print(f"[green]{mode} connection OK.[/green]")
+    console.print(f"Host: {profile.host}:{profile.port}")
+    console.print(f"Remote cwd: {pwd}")
+    console.print(f"WordPress root configured: {remote_root}")
+    if not profile.use_tls:
+        console.print("[yellow]Warning: this profile uses plain FTP; credentials/data are not transport-encrypted.[/yellow]")
+
+
 @app.command("backup-ftp")
 def backup_ftp(
     host: str = typer.Option(..., "--host"),
@@ -133,6 +167,37 @@ def backup_ftp(
     console.print(f"Transfer profile: workers={workers}, block={block_mb} MiB, resume={resume}, passive={passive}")
 
     report = backup_wordpress_ftp(transport, remote_root, out, resume=resume)
+    _print_backup_report(report)
+
+
+@app.command("backup-config")
+def backup_config(
+    config: Path = typer.Argument(..., exists=True, dir_okay=False),
+    out: Path | None = typer.Option(None, "--out", help="Local backup directory. Defaults to ./backups/<host>"),
+    resume: bool = typer.Option(True, "--resume/--no-resume"),
+) -> None:
+    """Back up WordPress using a JSON site connection profile."""
+    profile = load_site_profile(config)
+    transport, remote_root = _profile_transport(config)
+    out = out or Path("backups") / profile.host
+
+    if not profile.use_tls:
+        console.print("[yellow]Warning: profile protocol=ftp uses unencrypted transport.[/yellow]")
+
+    pwd = transport.test_connection()
+    console.print(f"Connected to {profile.host}:{profile.port}. Remote cwd: {pwd}")
+    console.print(f"WordPress root: {remote_root}")
+    console.print(
+        f"Transfer profile: workers={profile.workers}, block={profile.block_mb} MiB, "
+        f"resume={resume}, passive={profile.passive}"
+    )
+    console.print(f"Local backup: {out}")
+
+    report = backup_wordpress_ftp(transport, remote_root, out, resume=resume)
+    _print_backup_report(report)
+
+
+def _print_backup_report(report) -> None:
     total_files = sum(item.files_total for item in report.items)
     downloaded = sum(item.files_downloaded for item in report.items)
     skipped = sum(item.files_skipped for item in report.items)

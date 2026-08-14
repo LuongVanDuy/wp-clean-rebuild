@@ -13,6 +13,7 @@ from wpclean.rebuild_execute import (
     SALT_KEYS,
     _database_import_bridge,
     _extract_wordpress,
+    build_clean_htaccess,
     build_fresh_wp_config,
 )
 
@@ -44,6 +45,23 @@ def test_fresh_wp_config_preserves_db_prefix_and_rotates_salts(tmp_path: Path):
         match = re.search(rf"define\('{key}', '([^']+)'\);", generated)
         assert match is not None
         assert len(match.group(1)) >= 64
+
+
+def test_clean_htaccess_uses_standard_root_wordpress_rewrites():
+    generated = build_clean_htaccess("https://example.com")
+
+    assert "# BEGIN WordPress" in generated
+    assert "RewriteBase /" in generated
+    assert "RewriteRule . /index.php [L]" in generated
+    assert "HTTP_AUTHORIZATION" in generated
+    assert "evil" not in generated
+
+
+def test_clean_htaccess_supports_subdirectory_site_url():
+    generated = build_clean_htaccess("https://example.com/blog/")
+
+    assert "RewriteBase /blog/" in generated
+    assert "RewriteRule . /blog/index.php [L]" in generated
 
 
 def test_extract_wordpress_requires_expected_layout_and_reads_version(tmp_path: Path):
@@ -92,4 +110,5 @@ def test_rebuild_command_requires_explicit_execute_flag(tmp_path: Path):
     assert result.exit_code == 0
     assert "DRY ARM ONLY" in result.stdout
     assert "--execute" in result.stdout
+    assert "clean WordPress .htaccess" in result.stdout
     assert "nothing was changed remotely" in result.stdout.lower()

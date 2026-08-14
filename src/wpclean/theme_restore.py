@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 import hashlib
+import json
 from pathlib import Path, PurePosixPath
 import re
 from tempfile import TemporaryDirectory
@@ -109,8 +110,6 @@ def _sql_unescape(value: str) -> str:
 
 
 def _find_option_value(sql: str, option_name: str) -> str | None:
-    # WordPress/MySQL dumps normally keep option_id, option_name, option_value,
-    # autoload in this order even when INSERT statements include column names.
     pattern = re.compile(
         rf"\(\s*\d+\s*,\s*'{re.escape(option_name)}'\s*,\s*'((?:\\.|[^'])*)'\s*,",
         re.I,
@@ -119,7 +118,6 @@ def _find_option_value(sql: str, option_name: str) -> str | None:
     if matches:
         return _sql_unescape(matches[-1])
 
-    # Fallback for dumps that omit option_id and insert option_name first.
     fallback = re.compile(
         rf"\(\s*'{re.escape(option_name)}'\s*,\s*'((?:\\.|[^'])*)'\s*,",
         re.I,
@@ -195,7 +193,6 @@ def _score_child_file(path: Path, data: bytes) -> Finding | None:
             score += 30
             signals.append(Signal("theme.long_encoded_blob", 30, "Large encoded blob found in PHP source."))
 
-        # Combinations are much stronger than any one API call in isolation.
         if obfuscation and (dynamic or system_exec):
             score += 30
         if request_input and (dynamic or system_exec or mutation):
@@ -225,9 +222,37 @@ def _score_child_file(path: Path, data: bytes) -> Finding | None:
     )
 
 
-def scan_child_theme(theme_root: Path, *, slug: str | None = None) -> ChildThemeScan:
+def _child_theme_backup_exclusions(backup_root: Path, slug: str) -> list[str]:
+    report_path = backup_root / "backup-report.json"
+    if not report_path.is_file():
+        return []
+    try:
+        payload = json.loads(report_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return [f"BACKUP REPORT UNREADABLE: {report_path}"]
+
+    needle = f"/wp-content/themes/{slug.lower()}/"
+    exclusions: list[str] = []
+    for item in payload.get("exclusions", []):
+        if str(item.get("stage", "")).lower() != "themes":
+            continue
+        path = str(item.get("path") or "").replace("\\", "/")
+        normalized = "/" + path.lstrip("/").lower()
+        if needle in normalized:
+            exclusions.append(f"BACKUP EXCLUDED: {path}")
+    return exclusions
+
+
+def scan_child_theme(
+    theme_root: Path,
+    *,
+    slug: str | None = None,
+    backup_root: Path | None = None,
+) -> ChildThemeScan:
     slug = slug or theme_root.name
     report = ChildThemeScan(slug=slug, path=str(theme_root))
+    if backup_root is not None:
+        report.unreadable_files.extend(_child_theme_backup_exclusions(backup_root, slug))
     if not theme_root.is_dir():
         report.unreadable_files.append(str(theme_root))
         return report

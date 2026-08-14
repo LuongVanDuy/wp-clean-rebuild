@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import re
-import zipfile
 from pathlib import Path
 
 from ..models import Finding, Signal
@@ -23,8 +22,6 @@ PHP_ECHO_EXPR_HINT = re.compile(
     re.I,
 )
 DOUBLE_EXT = re.compile(r"\.(?:jpe?g|png|gif|webp|avif|pdf)\.(?:php\d*|phtml|phar)$", re.I)
-ARCHIVE_EXECUTABLE = re.compile(r"(?:^|/)[^/]+\.(?:php\d*|phtml|phar)$", re.I)
-ARCHIVE_DOUBLE_EXT = re.compile(r"\.(?:jpe?g|png|gif|webp|avif|pdf)\.(?:php\d*|phtml|phar)$", re.I)
 
 
 def _sha256(path: Path) -> str:
@@ -64,7 +61,6 @@ def _safe_preview(data: bytes, limit: int = 220) -> str:
 
 
 def _printable_ratio(data: bytes) -> float:
-    """Return fraction of bytes that look like ordinary source-code text."""
     if not data:
         return 0.0
     printable = sum(1 for value in data if value in (9, 10, 13) or 32 <= value <= 126)
@@ -72,11 +68,6 @@ def _printable_ratio(data: bytes) -> float:
 
 
 def _looks_like_php_source(window: bytes, token: bytes) -> bool:
-    """Reject random PHP-looking byte sequences inside compressed binary media.
-
-    Real PHP source around a tag is overwhelmingly textual. Compressed image bytes
-    can randomly contain '<?php' or '<?='; therefore a tag alone is never enough.
-    """
     sample = window[:512]
     if len(sample) < 12 or _printable_ratio(sample) < 0.82:
         return False
@@ -85,7 +76,6 @@ def _looks_like_php_source(window: bytes, token: bytes) -> bool:
     if token_lower.startswith(b"<?php"):
         return PHP_CODE_HINT.search(sample) is not None
 
-    # For short echo tags require a plausible PHP expression, not merely '<?='.
     body = sample[len(token) :]
     return PHP_ECHO_EXPR_HINT.search(body[:256]) is not None
 
@@ -104,7 +94,6 @@ def _is_benign_upload_index(path: Path, data: bytes) -> bool:
 
 
 def _find_php_payload(path: Path) -> tuple[int, str] | None:
-    """Return exact byte offset and sanitized preview for credible PHP in media."""
     chunk_size = 256 * 1024
     overlap = 4096
     carry = b""
@@ -125,39 +114,6 @@ def _find_php_payload(path: Path) -> tuple[int, str] | None:
     return None
 
 
-def _scan_zip(path: Path) -> tuple[list[Signal], list[str]]:
-    signals: list[Signal] = []
-    evidence: list[str] = []
-    try:
-        with zipfile.ZipFile(path) as archive:
-            names = archive.namelist()
-    except (OSError, zipfile.BadZipFile, zipfile.LargeZipFile):
-        return signals, evidence
-
-    executable_entries = [name for name in names if ARCHIVE_EXECUTABLE.search(name)]
-    double_ext_entries = [name for name in names if ARCHIVE_DOUBLE_EXT.search(name)]
-
-    if double_ext_entries:
-        evidence = double_ext_entries[:10]
-        signals.append(
-            Signal(
-                "uploads.archive_double_extension",
-                70,
-                f"ZIP contains media-looking executable file(s), e.g. {double_ext_entries[0]}",
-            )
-        )
-    elif executable_entries:
-        evidence = executable_entries[:10]
-        signals.append(
-            Signal(
-                "uploads.archive_executable",
-                40,
-                f"ZIP contains PHP-like executable file(s), e.g. {executable_entries[0]}",
-            )
-        )
-    return signals, evidence
-
-
 def scan_uploads(root: Path) -> list[Finding]:
     findings: list[Finding] = []
     for path in root.rglob("*"):
@@ -170,12 +126,28 @@ def scan_uploads(root: Path) -> list[Finding]:
         name = path.name.lower()
         metadata: dict[str, object] = {"suffix": suffix, "size": path.stat().st_size}
         preview = ""
+        action_override: str | None = None
 
         try:
             with path.open("rb") as fh:
                 head = fh.read(262144)
         except OSError:
             continue
+
+        # Clean-rebuild policy: archive packages under uploads are not needed for
+        # restoring media. Preserve them in the immutable evidence backup, but
+        # exclude them from the sanitized uploads set by default.
+        if suffix == ".zip":
+            signals.append(
+                Signal(
+                    "uploads.archive_restore_policy",
+                    30,
+                    "ZIP archive is preserved in the original backup but excluded from the clean restore set by policy.",
+                )
+            )
+            score += 30
+            action_override = "DROP FROM CLEAN RESTORE (ORIGINAL BACKUP KEPT)"
+            metadata["restore_policy"] = "drop"
 
         if suffix in EXECUTABLE_SUFFIXES:
             if _is_benign_upload_index(path, head):
@@ -187,13 +159,7 @@ def scan_uploads(root: Path) -> list[Finding]:
             signals.append(Signal("uploads.double_extension", 30, "Filename combines a media extension with an executable extension."))
             score += 30
 
-        if suffix == ".zip":
-            archive_signals, archive_entries = _scan_zip(path)
-            signals.extend(archive_signals)
-            score += sum(signal.score for signal in archive_signals)
-            if archive_entries:
-                metadata["archive_executable_entries"] = archive_entries
-        elif suffix in MEDIA_SUFFIXES:
+        if suffix in MEDIA_SUFFIXES:
             try:
                 payload = _find_php_payload(path)
             except OSError:
@@ -234,6 +200,7 @@ def scan_uploads(root: Path) -> list[Finding]:
                     signals,
                     preview=preview,
                     metadata=metadata,
+                    action_override=action_override,
                 )
             )
     return findings

@@ -23,6 +23,7 @@ _ANSI_RE = re.compile(r"\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 
 _READABILITY_CSS = r'''<style id="wpclean-readability">
 html,body{font-size:16px;line-height:1.45}
+.layout{display:block!important}.sidebar{display:none!important}.main{width:100%;min-width:0}.content{max-width:1800px;padding-left:32px;padding-right:32px}
 .brand strong{font-size:18px}.brand span{font-size:14px}.navbtn{font-size:16px}.side-note{font-size:14px}
 .top-title{font-size:18px}.btn{font-size:15px}.page-head h1{font-size:32px}.page-head p{font-size:16px}
 .summary-item span{font-size:13px}.summary-item b{font-size:24px}.panel-head h2{font-size:18px}.search{font-size:15px}
@@ -39,6 +40,7 @@ html,body{font-size:16px;line-height:1.45}
 .modalhead h2{font-size:24px}.modalhead p{font-size:15px}.field label{font-size:14px}.field input,.field select{font-size:16px}
 .hint{font-size:12px}.toast{font-size:14px}
 @media(max-width:1120px){.drawer{width:min(920px,98vw)}.detail-layout{grid-template-columns:1fr}.detail-right{position:relative;top:auto}.terminal-output{height:440px;min-height:360px}}
+@media(max-width:820px){.content{padding-left:14px;padding-right:14px}}
 </style>'''
 
 

@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+from contextlib import redirect_stderr, redirect_stdout
+from datetime import datetime
 from pathlib import Path
 from typing import Any
+import re
+import sys
 
 from . import gui_server as server
 from . import gui_ui
@@ -11,6 +15,10 @@ from .theme_restore import existing_child_theme_repair, plan_theme_stage
 _ORIGINAL_PROJECT_PAYLOAD = server._project_payload
 _ORIGINAL_CREATE_PROJECT = server.create_project
 _ORIGINAL_RENDER_APP = gui_ui.render_app
+_ORIGINAL_RUN_PIPELINE = server._run_pipeline
+_ORIGINAL_PROGRESS = server._progress
+_ORIGINAL_JOB_TO_DICT = server.GuiJob.to_dict
+_ANSI_RE = re.compile(r"\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 
 
 _READABILITY_CSS = r'''<style id="wpclean-readability">
@@ -20,14 +28,40 @@ html,body{font-size:16px;line-height:1.45}
 .summary-item span{font-size:13px}.summary-item b{font-size:24px}.panel-head h2{font-size:18px}.search{font-size:15px}
 .project-header{font-size:13px}.project-name h3{font-size:17px}.project-name p{font-size:15px}.status{font-size:13px}
 .current-step{font-size:15px}.progress-num{font-size:13px}.open-btn{font-size:15px}.empty{font-size:16px}
-.drawer-title h2{font-size:25px}.drawer-title p{font-size:15px}.section-title{font-size:14px}
+.drawer{width:min(1380px,98vw)}.drawer-title h2{font-size:25px}.drawer-title p{font-size:15px}.drawer-body{padding:22px 24px 36px}.section-title{font-size:14px}
+.detail-layout{display:grid;grid-template-columns:minmax(470px,.9fr) minmax(560px,1.1fr);gap:24px;align-items:start}.detail-left,.detail-right{min-width:0}.detail-right{position:sticky;top:88px}
 .kv span{font-size:13px}.kv b{font-size:15px}.step label{font-size:15px}.step small{font-size:13px}.stepdot{font-size:12px}
 .action-card h3{font-size:17px}.action-card p{font-size:15px}.confirm-input{font-size:15px}
 .check b{font-size:15px}.check span{font-size:13px}.job h3{font-size:16px}.job p{font-size:14px}.jobcur{font-size:13px}
-.errorbox{font-size:13px}.logs div{font-size:12px}.foot-danger p{font-size:13px}
+.errorbox{font-size:13px}.job .logs{display:none}.foot-danger p{font-size:13px}
+.terminal-panel{border:1px solid #273244;border-radius:10px;background:#111827;overflow:hidden;box-shadow:0 8px 24px rgba(15,23,42,.08)}
+.terminal-head{height:48px;padding:0 14px;display:flex;align-items:center;justify-content:space-between;gap:12px;border-bottom:1px solid #2a3548;background:#172033;color:#e5e7eb}.terminal-title{display:flex;align-items:center;gap:9px;font-size:14px;font-weight:600;letter-spacing:.2px}.terminal-dot{width:8px;height:8px;border-radius:50%;background:#39c985}.terminal-meta{font-size:12px;color:#9ca9bb;font-weight:400}.terminal-copy{border:1px solid #3a465a;background:#202a3c;color:#dbe4f0;border-radius:6px;padding:6px 9px;font-size:12px;font-weight:500;cursor:pointer}.terminal-copy:hover{background:#29364a}.terminal-output{height:calc(100vh - 178px);min-height:560px;margin:0;padding:15px 16px;overflow:auto;white-space:pre-wrap;word-break:break-word;background:#0d1422;color:#cbd5e1;font:14px/1.58 Consolas,"Cascadia Mono","Courier New",monospace;scrollbar-color:#3b4a61 #111827}.terminal-empty{color:#718096}
 .modalhead h2{font-size:24px}.modalhead p{font-size:15px}.field label{font-size:14px}.field input,.field select{font-size:16px}
 .hint{font-size:12px}.toast{font-size:14px}
+@media(max-width:1120px){.drawer{width:min(920px,98vw)}.detail-layout{grid-template-columns:1fr}.detail-right{position:relative;top:auto}.terminal-output{height:440px;min-height:360px}}
 </style>'''
+
+
+_DETAIL_JS = r'''
+function terminalPanelHtml(p){
+  const j=p.job||{};
+  const logs=Array.isArray(j.logs)?j.logs:[];
+  const status=j.status==='running'?'Đang chạy':j.status==='error'?'Có lỗi':j.status==='needs-action'?'Chờ xác nhận':j.status==='paused'?'Tạm dừng':j.status==='success'?'Hoàn tất':'Sẵn sàng';
+  const body=logs.length?logs.map(x=>esc(x)).join('\n'):'Chưa có log trong phiên GUI này. Nhấn Tiếp tục để bắt đầu xử lý.';
+  return `<div class="terminal-panel"><div class="terminal-head"><div><div class="terminal-title"><span class="terminal-dot"></span>LOG XỬ LÝ</div><div class="terminal-meta">${esc(status)} · ${logs.length} dòng gần nhất</div></div><button class="terminal-copy" type="button" onclick="copyTerminalLog()">Sao chép log</button></div><pre id="terminalOutput" class="terminal-output ${logs.length?'':'terminal-empty'}">${body}</pre></div>`;
+}
+async function copyTerminalLog(){
+  const el=qs('#terminalOutput');
+  if(!el)return;
+  try{await navigator.clipboard.writeText(el.textContent||'');toast('Đã sao chép log')}catch(e){toast('Không thể sao chép log tự động',true)}
+}
+renderDrawer=function(p){
+  state.selected=p.name;
+  const pc=progressOf(p);
+  qs('#drawerContent').innerHTML=`<div class="drawer-head"><div class="drawer-title"><div><h2>${esc(p.host)}</h2><p>${esc(p.name)} · ${pc}% hoàn tất</p></div><button class="xbtn" onclick="closePanels()">×</button></div></div><div class="drawer-body"><div class="detail-layout"><div class="detail-left"><div class="section"><div class="section-head"><div class="section-title">Kết nối FTP</div></div>${connectionHtml(p)}</div><div class="section"><div class="section-head"><div class="section-title">Tiến độ xử lý</div></div><div class="steps">${stepHtml(p)}</div>${jobHtml(p)}${decisionHtml(p)}</div>${p.themeRepair?`<div class="section"><button class="btn btn-warning" onclick="openRepair('${esc(p.name)}')">Mở thư mục theme repair</button></div>`:''}<div class="foot-danger"><p>Xóa dự án chỉ xóa dữ liệu local, không đụng hosting.</p>${p.completed?`<button class="btn btn-danger" onclick="deleteProject('${esc(p.name)}')">Xóa dự án local</button>`:''}</div></div><div class="detail-right">${terminalPanelHtml(p)}</div></div></div>`;
+  setTimeout(()=>{const out=qs('#terminalOutput');if(out)out.scrollTop=out.scrollHeight},0);
+}
+'''
 
 
 def _render_app(token: str) -> str:
@@ -45,7 +79,103 @@ def _render_app(token: str) -> str:
         "Đổi tài khoản, mật khẩu, port hoặc remote path. Mật khẩu FTP được hiển thị trực tiếp vì giao diện chỉ chạy local trên máy này.",
     )
     html = html.replace('placeholder="Để trống nếu không đổi"', 'placeholder="Mật khẩu FTP"')
-    return html.replace("</head>", _READABILITY_CSS + "\n</head>", 1)
+    html = html.replace("</head>", _READABILITY_CSS + "\n</head>", 1)
+    return html.replace("</script>\n</body>", _DETAIL_JS + "\n</script>\n</body>", 1)
+
+
+def _job_log(self, text: str) -> None:
+    clean = _ANSI_RE.sub("", str(text)).replace("\r", "\n")
+    lines = clean.splitlines() or [clean]
+    for raw in lines:
+        line = raw.strip()
+        if not line:
+            continue
+        if not re.match(r"^\[\d{2}:\d{2}:\d{2}\]", line):
+            line = f"[{datetime.now().strftime('%H:%M:%S')}] {line}"
+        self.logs.append(line)
+    if len(self.logs) > 500:
+        self.logs = self.logs[-500:]
+    self.touch()
+
+
+def _job_to_dict(self) -> dict[str, Any]:
+    payload = _ORIGINAL_JOB_TO_DICT(self)
+    payload["logs"] = self.logs[-300:]
+    return payload
+
+
+class _GuiTerminalStream:
+    def __init__(self, job, mirror, prefix: str = "") -> None:
+        self.job = job
+        self.mirror = mirror
+        self.prefix = prefix
+        self.buffer = ""
+        self.encoding = getattr(mirror, "encoding", "utf-8") or "utf-8"
+
+    def write(self, text: str) -> int:
+        if not text:
+            return 0
+        try:
+            self.mirror.write(text)
+        except Exception:
+            pass
+        clean = _ANSI_RE.sub("", str(text)).replace("\r", "\n")
+        self.buffer += clean
+        parts = self.buffer.split("\n")
+        self.buffer = parts.pop()
+        for line in parts:
+            line = line.strip()
+            if line:
+                self.job.log(f"{self.prefix}{line}")
+        if len(self.buffer) > 1600:
+            line = self.buffer.strip()
+            self.buffer = ""
+            if line:
+                self.job.log(f"{self.prefix}{line}")
+        return len(text)
+
+    def flush(self) -> None:
+        if self.buffer.strip():
+            self.job.log(f"{self.prefix}{self.buffer.strip()}")
+            self.buffer = ""
+        try:
+            self.mirror.flush()
+        except Exception:
+            pass
+
+    def isatty(self) -> bool:
+        return False
+
+
+def _progress_with_terminal_log(job, event: dict[str, Any]) -> None:
+    _ORIGINAL_PROGRESS(job, event)
+    phase = str(event.get("phase") or "")
+    if not phase:
+        return
+    bucket = (int(job.percent) // 10) * 10
+    key = f"{phase}:{bucket}"
+    if getattr(job, "_gui_progress_log_key", "") == key:
+        return
+    setattr(job, "_gui_progress_log_key", key)
+    current = str(event.get("current") or event.get("stage") or "").strip()
+    suffix = f" · {bucket}%" if bucket else ""
+    if current:
+        suffix += f" · {current}"
+    job.log(f"{job.message or phase}{suffix}")
+
+
+def _run_pipeline_with_terminal(name: str, options: dict[str, Any], job) -> None:
+    stdout_mirror = sys.__stdout__ or sys.stdout
+    stderr_mirror = sys.__stderr__ or sys.stderr
+    stdout_stream = _GuiTerminalStream(job, stdout_mirror)
+    stderr_stream = _GuiTerminalStream(job, stderr_mirror, prefix="ERROR | ")
+    job.log("Bắt đầu phiên xử lý GUI")
+    try:
+        with redirect_stdout(stdout_stream), redirect_stderr(stderr_stream):
+            _ORIGINAL_RUN_PIPELINE(name, options, job)
+    finally:
+        stdout_stream.flush()
+        stderr_stream.flush()
 
 
 def _project_payload(name: str) -> dict[str, Any]:
@@ -201,6 +331,10 @@ def _delete_project_local(name: str, confirmation: str) -> None:
 
 
 gui_ui.render_app = _render_app
+server.GuiJob.log = _job_log
+server.GuiJob.to_dict = _job_to_dict
+server._progress = _progress_with_terminal_log
+server._run_pipeline = _run_pipeline_with_terminal
 server._project_payload = _project_payload
 server.create_project = _create_or_update_project
 server._theme_gate = _theme_gate

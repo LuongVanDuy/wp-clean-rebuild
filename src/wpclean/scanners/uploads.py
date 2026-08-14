@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import zipfile
 from pathlib import Path
 
 from ..models import Finding, Signal
@@ -22,6 +23,24 @@ PHP_ECHO_EXPR_HINT = re.compile(
     re.I,
 )
 DOUBLE_EXT = re.compile(r"\.(?:jpe?g|png|gif|webp|avif|pdf)\.(?:php\d*|phtml|phar)$", re.I)
+ARCHIVE_EXECUTABLE = re.compile(r"(?:^|/)[^/]+\.(?:php\d*|phtml|phar)$", re.I)
+
+ARCHIVE_OBFUSCATION = re.compile(br"\b(?:gzinflate|gzdecode|base64_decode|str_rot13|hex2bin)\s*\(", re.I)
+ARCHIVE_EXECUTION = re.compile(br"\b(?:eval|assert|system|exec|shell_exec|passthru)\s*\(", re.I)
+ARCHIVE_USER_PERSISTENCE = re.compile(
+    br"\b(?:username_exists|wp_create_user|wp_insert_user|wp_update_user|wp_set_password|set_role)\s*\(", re.I
+)
+ARCHIVE_CRON_PERSISTENCE = re.compile(br"\b(?:wp_schedule_event|wp_next_scheduled|wp_schedule_single_event)\s*\(", re.I)
+ARCHIVE_FILE_MUTATION = re.compile(
+    br"\b(?:file_put_contents|fwrite|chmod|rename|copy|unlink|opcache_invalidate)\s*\(", re.I
+)
+ARCHIVE_REMOTE_IO = re.compile(
+    br"\b(?:wp_remote_get|wp_remote_post|curl_exec|curl_multi_exec|fsockopen|pfsockopen)\s*\(", re.I
+)
+ARCHIVE_RANDOM_FUNCTION = re.compile(br"\bfunction\s+[a-z0-9_]{12,}\s*\(", re.I)
+
+MAX_ARCHIVE_PHP_FILES = 25
+MAX_ARCHIVE_MEMBER_BYTES = 2 * 1024 * 1024
 
 
 def _sha256(path: Path) -> str:
@@ -114,6 +133,82 @@ def _find_php_payload(path: Path) -> tuple[int, str] | None:
     return None
 
 
+def _score_php_archive_member(data: bytes) -> tuple[int, list[str]]:
+    """Static malware score for PHP stored inside an upload archive.
+
+    This deliberately requires multiple behavioral indicators before treating an
+    archive as malicious. A normal plugin ZIP may contain PHP, but should not
+    combine heavy obfuscation, persistence, account manipulation and file writes.
+    """
+    score = 0
+    reasons: list[str] = []
+
+    if ARCHIVE_OBFUSCATION.search(data):
+        score += 25
+        reasons.append("compressed/encoded payload decoder")
+    if ARCHIVE_EXECUTION.search(data):
+        score += 30
+        reasons.append("dynamic/system execution primitive")
+    if ARCHIVE_USER_PERSISTENCE.search(data):
+        score += 25
+        reasons.append("WordPress user/account manipulation")
+    if ARCHIVE_CRON_PERSISTENCE.search(data):
+        score += 20
+        reasons.append("WordPress cron persistence")
+    if ARCHIVE_FILE_MUTATION.search(data):
+        score += 20
+        reasons.append("filesystem mutation/opcache invalidation")
+    if ARCHIVE_REMOTE_IO.search(data):
+        score += 25
+        reasons.append("remote/network I/O")
+
+    random_function_count = len(ARCHIVE_RANDOM_FUNCTION.findall(data))
+    if random_function_count >= 8:
+        score += 25
+        reasons.append(f"heavy identifier obfuscation ({random_function_count} long random function names)")
+
+    return min(score, 100), reasons
+
+
+def _scan_zip_for_malicious_php(path: Path) -> tuple[list[str], list[dict[str, object]], str]:
+    php_entries: list[str] = []
+    suspicious: list[dict[str, object]] = []
+    preview = ""
+
+    try:
+        with zipfile.ZipFile(path) as archive:
+            for info in archive.infolist():
+                name = info.filename.replace("\\", "/")
+                if info.is_dir() or not ARCHIVE_EXECUTABLE.search(name):
+                    continue
+                php_entries.append(name)
+                if len(php_entries) > MAX_ARCHIVE_PHP_FILES:
+                    break
+
+                try:
+                    with archive.open(info) as fh:
+                        data = fh.read(MAX_ARCHIVE_MEMBER_BYTES)
+                except (OSError, RuntimeError, zipfile.BadZipFile):
+                    continue
+
+                member_score, reasons = _score_php_archive_member(data)
+                if member_score >= 60:
+                    suspicious.append(
+                        {
+                            "entry": name,
+                            "score": member_score,
+                            "reasons": reasons,
+                            "bytes_scanned": len(data),
+                        }
+                    )
+                    if not preview:
+                        preview = _safe_preview(data[:800])
+    except (OSError, RuntimeError, zipfile.BadZipFile, zipfile.LargeZipFile):
+        return php_entries, suspicious, preview
+
+    return php_entries, suspicious, preview
+
+
 def scan_uploads(root: Path) -> list[Finding]:
     findings: list[Finding] = []
     for path in root.rglob("*"):
@@ -134,9 +229,8 @@ def scan_uploads(root: Path) -> list[Finding]:
         except OSError:
             continue
 
-        # Clean-rebuild policy: archive packages under uploads are not needed for
-        # restoring media. Preserve them in the immutable evidence backup, but
-        # exclude them from the sanitized uploads set by default.
+        # Clean-rebuild policy: ZIP packages under uploads are never copied into
+        # the sanitized restore set. The immutable original backup remains intact.
         if suffix == ".zip":
             signals.append(
                 Signal(
@@ -148,6 +242,22 @@ def scan_uploads(root: Path) -> list[Finding]:
             score += 30
             action_override = "DROP FROM CLEAN RESTORE (ORIGINAL BACKUP KEPT)"
             metadata["restore_policy"] = "drop"
+
+            php_entries, suspicious_entries, zip_preview = _scan_zip_for_malicious_php(path)
+            if php_entries:
+                metadata["archive_php_entries"] = php_entries
+            if suspicious_entries:
+                signals.append(
+                    Signal(
+                        "uploads.archive_malicious_php",
+                        70,
+                        "ZIP contains PHP with multiple malware-like behaviors (obfuscation/persistence/file mutation/execution).",
+                    )
+                )
+                score += 70
+                metadata["archive_suspicious_entries"] = suspicious_entries
+                action_override = "QUARANTINE / DROP FROM CLEAN RESTORE (ORIGINAL BACKUP KEPT)"
+                preview = zip_preview
 
         if suffix in EXECUTABLE_SUFFIXES:
             if _is_benign_upload_index(path, head):

@@ -94,6 +94,48 @@ def test_completed_theme_without_plugin_goes_to_plugin(tmp_path: Path):
     assert _next_stage(status) == "plugin"
 
 
+def test_completed_plugins_without_mu_plugins_returns_to_combined_plugin_stage(tmp_path: Path):
+    paths = _paths(tmp_path)
+    paths["execute"].parent.mkdir(parents=True, exist_ok=True)
+    paths["execute"].write_text(
+        """{
+          "database_imported": true,
+          "wp_config_uploaded": true,
+          "htaccess_uploaded": true,
+          "core_uploaded": 1200,
+          "theme_stage": {"mode": "flatsome", "flatsome_installed": true},
+          "plugin_stage": {"inventory_count": 0}
+        }""",
+        encoding="utf-8",
+    )
+
+    status = _infer_status(paths)
+    assert status["plugin_done"] is True
+    assert status["mu_plugin_done"] is False
+    assert _next_stage(status) == "plugin"
+
+
+def test_completed_mu_plugins_can_continue_to_final(tmp_path: Path):
+    paths = _paths(tmp_path)
+    paths["execute"].parent.mkdir(parents=True, exist_ok=True)
+    paths["execute"].write_text(
+        """{
+          "database_imported": true,
+          "wp_config_uploaded": true,
+          "htaccess_uploaded": true,
+          "core_uploaded": 1200,
+          "theme_stage": {"mode": "flatsome", "flatsome_installed": true},
+          "plugin_stage": {"inventory_count": 0},
+          "mu_plugin_stage": {"completed": true, "blocked_components": 0, "files_uploaded": 2}
+        }""",
+        encoding="utf-8",
+    )
+
+    status = _infer_status(paths)
+    assert status["mu_plugin_done"] is True
+    assert _next_stage(status) == "final"
+
+
 def test_final_pass_marks_project_done(tmp_path: Path):
     paths = _paths(tmp_path)
     paths["final"].parent.mkdir(parents=True, exist_ok=True)

@@ -16,10 +16,17 @@ class SiteConnectionProfile:
     passive: bool = True
     workers: int = 6
     block_mb: int = 1
+    site_url: str | None = None
 
     @property
     def use_tls(self) -> bool:
         return self.protocol.lower() in {"ftps", "ftp+tls", "ftp-tls"}
+
+    @property
+    def web_base_url(self) -> str:
+        if self.site_url:
+            return self.site_url.rstrip("/")
+        return f"https://{self.host}".rstrip("/")
 
 
 def load_site_profile(path: Path) -> SiteConnectionProfile:
@@ -37,6 +44,10 @@ def load_site_profile(path: Path) -> SiteConnectionProfile:
         )
 
     default_port = 21
+    site_url = str(raw["siteUrl"]).strip() if raw.get("siteUrl") else None
+    if site_url and not site_url.lower().startswith(("http://", "https://")):
+        raise ValueError("siteUrl must start with http:// or https://")
+
     return SiteConnectionProfile(
         host=str(raw["host"]).strip(),
         username=str(raw["username"]).strip(),
@@ -47,4 +58,5 @@ def load_site_profile(path: Path) -> SiteConnectionProfile:
         passive=bool(raw.get("passive", True)),
         workers=max(1, min(16, int(raw.get("workers", 6)))),
         block_mb=max(1, min(8, int(raw.get("blockMb", 1)))),
+        site_url=site_url,
     )

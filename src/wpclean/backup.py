@@ -58,6 +58,13 @@ def write_manifest(root: Path) -> Path:
 
 
 def verify_manifest(root: Path, manifest_path: Path | None = None) -> tuple[bool, list[str]]:
+    """Verify file integrity and, for full backups, minimum completeness.
+
+    Before the database stage exists this behaves as an integrity-only check so a
+    filesystem backup can be verified independently. Once database/original.sql
+    exists, the backup is treated as a full backup and required rebuild artifacts
+    must also be present.
+    """
     manifest_path = manifest_path or root / "manifest.json"
     raw = json.loads(manifest_path.read_text(encoding="utf-8"))
     problems: list[str] = []
@@ -72,15 +79,18 @@ def verify_manifest(root: Path, manifest_path: Path | None = None) -> tuple[bool
         actual = sha256_file(path)
         if actual != entry["sha256"]:
             problems.append(f"hash mismatch: {entry['path']}")
+
+    # A database dump marks this as a full backup. Integrity alone is not enough:
+    # required filesystem stages must also have been captured.
+    if (root / "database" / "original.sql").is_file():
+        completeness = verify_backup_completeness(root, require_database=True)
+        problems.extend(f"incomplete: {problem}" for problem in completeness.problems)
+
     return (not problems, problems)
 
 
 def verify_backup_completeness(root: Path, *, require_database: bool = True) -> BackupCompleteness:
-    """Check whether a backup contains the minimum artifacts needed for a safe rebuild.
-
-    Integrity and completeness are deliberately separate concepts: a manifest can
-    verify perfectly even when an entire backup stage was never captured.
-    """
+    """Check whether a backup contains the minimum artifacts needed for a safe rebuild."""
     problems: list[str] = []
 
     if require_database:
@@ -106,11 +116,17 @@ def verify_backup_completeness(root: Path, *, require_database: bool = True) -> 
             for item in report.get("items", []):
                 remote = str(item.get("remote_path", ""))
                 status = str(item.get("status", ""))
-                # mu-plugins and individual optional config files may legitimately
-                # be absent. Core rebuild evidence must not silently fail.
-                optional = remote.endswith("/wp-content/mu-plugins") or remote.endswith("/php.ini") or remote.endswith("/.user.ini") or remote.endswith("/robots.txt")
+                # These are legitimately optional on many WordPress installations.
+                optional = (
+                    remote.endswith("/wp-content/mu-plugins")
+                    or remote.endswith("/php.ini")
+                    or remote.endswith("/.user.ini")
+                    or remote.endswith("/robots.txt")
+                )
                 if status != "ok" and not optional:
-                    problems.append(f"backup stage incomplete: {remote or 'unknown'} ({status or 'unknown'})")
+                    problems.append(
+                        f"backup stage incomplete: {remote or 'unknown'} ({status or 'unknown'})"
+                    )
         except Exception as exc:
             problems.append(f"backup-report.json could not be parsed: {exc}")
 

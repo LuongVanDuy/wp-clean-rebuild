@@ -10,12 +10,28 @@ from wpclean.transport.ftp import RemoteFile
 
 
 class FakeTransport:
-    def __init__(self, files: list[RemoteFile], *, tls: bool = True):
+    def __init__(
+        self,
+        files: list[RemoteFile],
+        *,
+        tls: bool = True,
+        remote_root_exists: bool = True,
+    ):
         self._files = files
         self.config = SimpleNamespace(tls=tls)
+        self.remote_root_exists = remote_root_exists
+        self.recursive_calls = 0
+        self.directory_checks = 0
 
-    def list_files_recursive(self, remote_root: str):
+    def list_files_recursive(self, remote_root: str, progress=None):
+        self.recursive_calls += 1
+        if progress:
+            progress({"phase": "discovered", "dirs_scanned": 1, "files_found": len(self._files)})
         return list(self._files)
+
+    def directory_exists(self, remote_root: str) -> bool:
+        self.directory_checks += 1
+        return self.remote_root_exists
 
 
 def _make_verified_backup(tmp_path: Path) -> Path:
@@ -59,6 +75,7 @@ def test_preflight_passes_known_core_backed_uploads_and_well_known(tmp_path: Pat
     assert report.blocked_files == 0
     assert report.preserve_files == 1
     assert report.wipe_files == 4
+    assert report.mode == "full"
 
 
 def test_preflight_blocks_unknown_unbacked_file(tmp_path: Path):
@@ -105,3 +122,45 @@ def test_preflight_warns_on_plain_ftp(tmp_path: Path):
     )
     assert report.ready_for_destructive_rebuild is True
     assert any("plain FTP" in warning for warning in report.warnings)
+
+
+def test_fast_preflight_skips_recursive_remote_inventory(tmp_path: Path):
+    backup = _make_verified_backup(tmp_path)
+    remote_root = "/domains/example.com/public_html"
+    transport = FakeTransport(
+        [RemoteFile(f"{remote_root}/unknown.php", 99)],
+        remote_root_exists=True,
+    )
+    report = run_rebuild_preflight(
+        host="example.com",
+        transport=transport,
+        remote_root=remote_root,
+        backup_root=backup,
+        report_path=tmp_path / "report.json",
+        fast=True,
+    )
+    assert report.ready_for_destructive_rebuild is True
+    assert report.mode == "fast"
+    assert report.remote_root_verified is True
+    assert report.remote_files == 0
+    assert transport.directory_checks == 1
+    assert transport.recursive_calls == 0
+    assert any("skips the duplicate recursive remote inventory" in warning for warning in report.warnings)
+
+
+def test_fast_preflight_blocks_wrong_remote_root(tmp_path: Path):
+    backup = _make_verified_backup(tmp_path)
+    transport = FakeTransport([], remote_root_exists=False)
+    try:
+        run_rebuild_preflight(
+            host="example.com",
+            transport=transport,
+            remote_root="/domains/example.com/wrong-root",
+            backup_root=backup,
+            report_path=tmp_path / "report.json",
+            fast=True,
+        )
+    except ValueError as exc:
+        assert "does not exist or is not accessible" in str(exc)
+    else:
+        raise AssertionError("fast preflight should block an invalid remote root")

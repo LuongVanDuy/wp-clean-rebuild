@@ -1,0 +1,21 @@
+[project]
+name = "wp-clean-rebuild"
+version = "0.1.0"
+description = "Interactive WordPress clean rebuild and malware triage CLI"
+requires-python = ">=3.11"
+dependencies = [
+  "typer>=0.12",
+  "rich>=13.7",
+  "paramiko>=3.4",
+  "PyYAML>=6.0",
+]
+
+[project.scripts]
+wpclean = "wpclean.cli:app"
+
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

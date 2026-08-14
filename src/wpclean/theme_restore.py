@@ -110,14 +110,17 @@ def _sql_unescape(value: str) -> str:
 
 
 def _find_option_value(sql: str, option_name: str) -> str | None:
+    # db_bridge exports every non-NULL cell quoted, including numeric option_id,
+    # while external dumps may leave numeric IDs unquoted. Accept both formats.
     pattern = re.compile(
-        rf"\(\s*\d+\s*,\s*'{re.escape(option_name)}'\s*,\s*'((?:\\.|[^'])*)'\s*,",
+        rf"\(\s*(?:'\d+'|\d+)\s*,\s*'{re.escape(option_name)}'\s*,\s*'((?:\\.|[^'])*)'\s*,",
         re.I,
     )
     matches = pattern.findall(sql)
     if matches:
         return _sql_unescape(matches[-1])
 
+    # Fallback for dumps that omit option_id and insert option_name first.
     fallback = re.compile(
         rf"\(\s*'{re.escape(option_name)}'\s*,\s*'((?:\\.|[^'])*)'\s*,",
         re.I,

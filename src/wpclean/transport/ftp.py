@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from ftplib import FTP, FTP_TLS, error_perm
+from ftplib import FTP, FTP_TLS, error_perm, error_temp
 from pathlib import Path, PurePosixPath
 from typing import Callable
 import os
@@ -24,6 +24,7 @@ class FTPConfig:
     timeout: float = 30.0
     workers: int = 6
     block_size: int = 1024 * 1024
+    retries: int = 4
 
 
 @dataclass(slots=True)
@@ -48,7 +49,7 @@ class TransferStats:
 
 
 class FTPTransport:
-    """High-throughput FTP/FTPS downloader with bounded parallelism and resume support."""
+    """High-throughput FTP/FTPS downloader with bounded parallelism, retry, and resume support."""
 
     def __init__(self, config: FTPConfig):
         self.config = config
@@ -76,6 +77,15 @@ class FTPTransport:
             client = self._new_client()
             self._local.client = client
         return client
+
+    def _reset_thread_client(self) -> None:
+        client = getattr(self._local, "client", None)
+        if client is not None:
+            try:
+                client.close()
+            except Exception:
+                pass
+        self._local.client = None
 
     def test_connection(self) -> str:
         client = self._new_client()
@@ -195,39 +205,73 @@ class FTPTransport:
         remote_root: str,
         local_root: Path,
         resume: bool,
+        progress: ProgressCallback | None = None,
     ) -> tuple[str, int]:
-        client = self._thread_client()
         rel = PurePosixPath(remote_file.path).relative_to(PurePosixPath(remote_root))
         local_path = local_root.joinpath(*rel.parts)
         local_path.parent.mkdir(parents=True, exist_ok=True)
 
-        offset = local_path.stat().st_size if resume and local_path.exists() else 0
-        if remote_file.size is not None and offset == remote_file.size:
-            return "skipped", 0
-        if remote_file.size is not None and offset > remote_file.size:
-            local_path.unlink(missing_ok=True)
-            offset = 0
+        initial_size = local_path.stat().st_size if resume and local_path.exists() else 0
+        max_attempts = max(1, int(self.config.retries) + 1)
+        last_error: BaseException | None = None
 
-        mode = "ab" if offset else "wb"
-        start_size = offset
-        try:
-            with local_path.open(mode) as fh:
-                client.retrbinary(
-                    f"RETR {remote_file.path}",
-                    fh.write,
-                    blocksize=self.config.block_size,
-                    rest=offset if offset else None,
-                )
-        except Exception:
+        for attempt in range(1, max_attempts + 1):
+            offset = local_path.stat().st_size if resume and local_path.exists() else 0
+            if remote_file.size is not None and offset == remote_file.size:
+                status = "skipped" if attempt == 1 and initial_size == remote_file.size else "downloaded"
+                return status, max(0, offset - initial_size)
+            if remote_file.size is not None and offset > remote_file.size:
+                local_path.unlink(missing_ok=True)
+                offset = 0
+                if attempt == 1:
+                    initial_size = 0
+
+            mode = "ab" if offset else "wb"
+            client = self._thread_client()
             try:
-                client.close()
-            except Exception:
-                pass
-            self._local.client = None
-            raise
+                with local_path.open(mode) as fh:
+                    client.retrbinary(
+                        f"RETR {remote_file.path}",
+                        fh.write,
+                        blocksize=self.config.block_size,
+                        rest=offset if offset else None,
+                    )
 
-        final_size = local_path.stat().st_size
-        return "downloaded", max(0, final_size - start_size)
+                final_size = local_path.stat().st_size
+                if remote_file.size is not None and final_size != remote_file.size:
+                    raise EOFError(
+                        f"incomplete FTP transfer for {remote_file.path}: "
+                        f"received {final_size} of {remote_file.size} bytes"
+                    )
+                return "downloaded", max(0, final_size - initial_size)
+            except (ConnectionError, TimeoutError, EOFError, error_temp) as exc:
+                last_error = exc
+                self._reset_thread_client()
+                if attempt >= max_attempts:
+                    break
+
+                resume_offset = local_path.stat().st_size if resume and local_path.exists() else 0
+                if progress:
+                    progress(
+                        {
+                            "phase": "retry",
+                            "remote_root": remote_root,
+                            "current_file": remote_file.path,
+                            "attempt": attempt + 1,
+                            "max_attempts": max_attempts,
+                            "resume_offset": resume_offset,
+                            "error": f"{type(exc).__name__}: {exc}",
+                        }
+                    )
+                time.sleep(min(0.75 * (2 ** (attempt - 1)), 4.0))
+            except Exception:
+                self._reset_thread_client()
+                raise
+
+        raise RuntimeError(
+            f"FTP download failed after {max_attempts} attempts: {remote_file.path} "
+            f"({type(last_error).__name__}: {last_error})"
+        ) from last_error
 
     def download_tree(
         self,
@@ -247,7 +291,7 @@ class FTPTransport:
 
         with ThreadPoolExecutor(max_workers=max(1, self.config.workers), thread_name_prefix="ftp") as pool:
             futures = {
-                pool.submit(self._download_one, item, remote_root, local_root, resume): item
+                pool.submit(self._download_one, item, remote_root, local_root, resume, progress): item
                 for item in files
             }
             for future in as_completed(futures):

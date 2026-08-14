@@ -164,7 +164,8 @@ def _extract_wordpress(data: bytes, destination: Path) -> str:
                 continue
             target = destination.joinpath(*rel.parts)
             resolved = target.resolve()
-            if destination.resolve() not in resolved.parents and resolved != destination.resolve():
+            destination_resolved = destination.resolve()
+            if destination_resolved not in resolved.parents and resolved != destination_resolved:
                 raise RuntimeError(f"Unsafe ZIP member path: {name}")
             if member.is_dir():
                 target.mkdir(parents=True, exist_ok=True)
@@ -193,7 +194,6 @@ def _wipe_remote_root(
     deleted_files = 0
     deleted_dirs = 0
     preserved: list[str] = []
-    lock = threading.Lock()
 
     def emit(current: str) -> None:
         if progress:
@@ -221,13 +221,11 @@ def _wipe_remote_root(
                 if kind == "dir":
                     remove_dir(child)
                     client.rmd(child)
-                    with lock:
-                        deleted_dirs += 1
+                    deleted_dirs += 1
                     emit(child)
                 continue
             client.delete(child)
-            with lock:
-                deleted_files += 1
+            deleted_files += 1
             emit(child)
 
     try:
@@ -508,6 +506,8 @@ def _import_database(
     bridge_url = f"{profile.web_base_url}/{bridge_name}"
     bridge_removed = False
     data_removed = False
+    statements = 0
+    execution_error: Exception | None = None
 
     if progress:
         progress({"phase": "db_import_upload", "current": data_name})
@@ -531,7 +531,9 @@ def _import_database(
             payload = json.loads(response.read().decode("utf-8", errors="replace"))
         if not payload.get("ok"):
             raise RuntimeError(f"Database import bridge failed: {payload.get('message')}")
-        return int(payload.get("statements", 0)), False, False
+        statements = int(payload.get("statements", 0))
+    except Exception as exc:
+        execution_error = exc
     finally:
         bridge_removed = _delete_remote_file(transport, remote_bridge)
         data_removed = _delete_remote_file(transport, remote_data)
@@ -543,6 +545,21 @@ def _import_database(
                     "data_removed": data_removed,
                 }
             )
+
+    cleanup_problem = not bridge_removed or not data_removed
+    if execution_error is not None:
+        if cleanup_problem:
+            raise RuntimeError(
+                f"Database import failed ({execution_error}) and temporary import cleanup was incomplete: "
+                f"bridge_removed={bridge_removed}, data_removed={data_removed}"
+            ) from execution_error
+        raise execution_error
+    if cleanup_problem:
+        raise RuntimeError(
+            "Database import completed but temporary import cleanup was incomplete: "
+            f"bridge_removed={bridge_removed}, data_removed={data_removed}"
+        )
+    return statements, bridge_removed, data_removed
 
 
 def execute_rebuild(
@@ -609,7 +626,6 @@ def execute_rebuild(
         clean_sql = clean_root / "database" / "clean.sql"
         clean_uploads = clean_root / "uploads"
 
-        # Prepare everything locally before the destructive boundary.
         package = _download_wordpress_package(progress)
         report.wordpress_package_sha256 = _sha256_bytes(package)
 
@@ -619,7 +635,6 @@ def execute_rebuild(
                 progress({"phase": "extract_core"})
             report.wordpress_version = _extract_wordpress(package, core_root)
 
-            # Destructive boundary begins here.
             if progress:
                 progress({"phase": "destructive_boundary"})
             wiped_files, wiped_dirs, preserved = _wipe_remote_root(
@@ -682,7 +697,7 @@ def execute_rebuild(
                 "Old plugins/themes were not restored. Reinstall trusted copies before expecting full front-end parity."
             )
 
-        statements, _bridge_state, _data_state = _import_database(
+        statements, bridge_removed, data_removed = _import_database(
             profile,
             transport,
             clean_sql,
@@ -690,9 +705,8 @@ def execute_rebuild(
         )
         report.database_imported = True
         report.database_statements = statements
-        # Cleanup happens in the bridge finally block; probe exact remote state below.
-        report.temp_bridge_removed = True
-        report.temp_sql_removed = True
+        report.temp_bridge_removed = bridge_removed
+        report.temp_sql_removed = data_removed
 
         report.completed = True
         report.finished_at = datetime.now(timezone.utc).isoformat()

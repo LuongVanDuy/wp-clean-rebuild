@@ -124,8 +124,34 @@ def test_run_stage_uploads_only_clean_components(tmp_path: Path, monkeypatch):
     )
 
     assert uploaded == ["/public_html/wp-content/mu-plugins/safe.php"]
+    assert report.completed is True
     assert report.files_uploaded == 1
     assert report.clean_components == 1
     assert report.blocked_components == 1
     payload = json.loads(report_path.read_text(encoding="utf-8"))
     assert payload["mu_plugin_stage"]["blocked_components"] == 1
+
+
+def test_upload_failure_keeps_mu_stage_incomplete_for_retry(tmp_path: Path, monkeypatch):
+    root = tmp_path / "backup"
+    mu = root / "mu-plugins"
+    mu.mkdir(parents=True)
+    (mu / "safe.php").write_text("<?php add_action('init', 'safe_init');", encoding="utf-8")
+
+    def fail_upload(_transport, _remote_path: str, _local_path: Path):
+        raise ConnectionResetError("FTP reset")
+
+    monkeypatch.setattr("wpclean.mu_plugin_restore._upload_file", fail_upload)
+    report_path = tmp_path / "reports" / "rebuild-execute.json"
+
+    report = run_mu_plugin_stage(
+        profile=_profile(),
+        transport=object(),
+        backup_root=root,
+        report_path=report_path,
+    )
+
+    assert report.completed is False
+    assert report.files_uploaded == 0
+    assert report.blocked_components == 1
+    assert any("UPLOAD FAILED" in item for item in report.components[0].unreadable_files)

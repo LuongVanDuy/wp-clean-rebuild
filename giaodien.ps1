@@ -145,5 +145,5 @@ ThanhCong 'Môi trường chạy đã đầy đủ.'
 
 Buoc 'BƯỚC 2 - Mở giao diện local'
 Write-Host 'Trình duyệt sẽ tự mở. Giữ cửa sổ này chạy trong lúc sử dụng giao diện.' -ForegroundColor Cyan
-& $uvExe run python -m wpclean.gui_entry
+& $uvExe run python -m wpclean.gui_journal_entry
 exit $LASTEXITCODE

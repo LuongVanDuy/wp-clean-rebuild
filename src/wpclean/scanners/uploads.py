@@ -18,6 +18,10 @@ PHP_CODE_HINT = re.compile(
     br"(?:\$_(?:GET|POST|REQUEST|COOKIE|SERVER)\s*\[|\b(?:eval|assert|base64_decode|gzinflate|str_rot13|system|exec|shell_exec|passthru|include|include_once|require|require_once|echo|print|function)\b)",
     re.I,
 )
+PHP_ECHO_EXPR_HINT = re.compile(
+    br"(?:\$_(?:GET|POST|REQUEST|COOKIE|SERVER)\s*\[|\$[A-Za-z_][A-Za-z0-9_]*|\b(?:eval|assert|base64_decode|gzinflate|str_rot13|system|exec|shell_exec|passthru)\s*\(|[A-Za-z_][A-Za-z0-9_\\]*\s*\()",
+    re.I,
+)
 DOUBLE_EXT = re.compile(r"\.(?:jpe?g|png|gif|webp|avif|pdf)\.(?:php\d*|phtml|phar)$", re.I)
 ARCHIVE_EXECUTABLE = re.compile(r"(?:^|/)[^/]+\.(?:php\d*|phtml|phar)$", re.I)
 ARCHIVE_DOUBLE_EXT = re.compile(r"\.(?:jpe?g|png|gif|webp|avif|pdf)\.(?:php\d*|phtml|phar)$", re.I)
@@ -59,6 +63,33 @@ def _safe_preview(data: bytes, limit: int = 220) -> str:
     return text
 
 
+def _printable_ratio(data: bytes) -> float:
+    """Return fraction of bytes that look like ordinary source-code text."""
+    if not data:
+        return 0.0
+    printable = sum(1 for value in data if value in (9, 10, 13) or 32 <= value <= 126)
+    return printable / len(data)
+
+
+def _looks_like_php_source(window: bytes, token: bytes) -> bool:
+    """Reject random PHP-looking byte sequences inside compressed binary media.
+
+    Real PHP source around a tag is overwhelmingly textual. Compressed image bytes
+    can randomly contain '<?php' or '<?='; therefore a tag alone is never enough.
+    """
+    sample = window[:512]
+    if len(sample) < 12 or _printable_ratio(sample) < 0.82:
+        return False
+
+    token_lower = token.lower()
+    if token_lower.startswith(b"<?php"):
+        return PHP_CODE_HINT.search(sample) is not None
+
+    # For short echo tags require a plausible PHP expression, not merely '<?='.
+    body = sample[len(token) :]
+    return PHP_ECHO_EXPR_HINT.search(body[:256]) is not None
+
+
 def _is_benign_upload_index(path: Path, data: bytes) -> bool:
     if path.name.lower() != "index.php" or len(data) > 2048:
         return False
@@ -73,11 +104,7 @@ def _is_benign_upload_index(path: Path, data: bytes) -> bool:
 
 
 def _find_php_payload(path: Path) -> tuple[int, str] | None:
-    """Return exact byte offset and a short sanitized preview for a PHP payload in media.
-
-    Scans in chunks with overlap so appended payloads near the end of larger media
-    files are detected without loading the whole file into memory.
-    """
+    """Return exact byte offset and sanitized preview for credible PHP in media."""
     chunk_size = 256 * 1024
     overlap = 4096
     carry = b""
@@ -89,9 +116,9 @@ def _find_php_payload(path: Path) -> tuple[int, str] | None:
             base = max(0, absolute - len(carry))
             for match in STRICT_PHP_TOKEN.finditer(data):
                 window = data[match.start() : match.start() + 4096]
-                if match.group(0).lower().startswith(b"<?=") or PHP_CODE_HINT.search(window):
+                if _looks_like_php_source(window, match.group(0)):
                     start = max(0, match.start() - 48)
-                    end = min(len(data), match.start() + 320)
+                    end = min(len(data), match.start() + 512)
                     return base + match.start(), _safe_preview(data[start:end])
             carry = data[-overlap:]
             absolute += len(chunk)
@@ -177,7 +204,7 @@ def scan_uploads(root: Path) -> list[Finding]:
                     Signal(
                         "uploads.php_content",
                         80,
-                        "Media file contains a real PHP opening tag with nearby PHP-like code.",
+                        "Media file contains a PHP tag in a text-like region with plausible PHP code.",
                     )
                 )
                 score += 80

@@ -34,8 +34,10 @@ class RemoteBackupReport:
     remote_root: str
     backup_root: str
     items: list[BackupItemReport] = field(default_factory=list)
+    exclusions: list[dict] = field(default_factory=list)
     manifest_path: str | None = None
     verified: bool = False
+    verified_with_exclusions: bool = False
     verification_problems: list[str] = field(default_factory=list)
 
 
@@ -61,18 +63,33 @@ def _join(root: str, child: str) -> str:
 
 def _item_from_stats(remote: str, local: Path, kind: str, stats: TransferStats) -> BackupItemReport:
     failed_files = [asdict(item) for item in stats.failures]
+    successful_files = max(0, stats.files_total - stats.files_failed)
+
+    if stats.files_failed and successful_files == 0 and stats.files_total > 0:
+        status = "transfer-failed"
+        error = f"all {stats.files_failed} file(s) failed after FTP retry budget"
+    elif stats.files_failed:
+        status = "ok-with-exclusions"
+        error = (
+            f"EXCLUDED {stats.files_failed} unreadable file(s) after FTP retry budget; "
+            "excluded files are not restored"
+        )
+    else:
+        status = "ok"
+        error = None
+
     return BackupItemReport(
         remote_path=remote,
         local_path=str(local),
         kind=kind,
-        status="partial" if stats.files_failed else "ok",
+        status=status,
         files_total=stats.files_total,
         files_downloaded=stats.files_downloaded,
         files_skipped=stats.files_skipped,
         files_failed=stats.files_failed,
         bytes_downloaded=stats.bytes_downloaded,
         failed_files=failed_files,
-        error=(f"{stats.files_failed} file(s) failed after FTP retry budget" if stats.files_failed else None),
+        error=error,
     )
 
 
@@ -84,7 +101,12 @@ def backup_wordpress_ftp(
     resume: bool = True,
     progress: BackupProgressCallback | None = None,
 ) -> RemoteBackupReport:
-    """Back up WordPress user data/reference code over FTP/FTPS."""
+    """Back up WordPress user data/reference code over FTP/FTPS.
+
+    Individual files that remain unreadable after the retry budget are recorded as
+    explicit exclusions and are never restored. A whole stage failure, or failure
+    of a required config artifact, still blocks verification.
+    """
     backup_root.mkdir(parents=True, exist_ok=True)
     report = RemoteBackupReport(
         transport="ftps" if transport.config.tls else "ftp",
@@ -104,7 +126,18 @@ def backup_wordpress_ftp(
 
         try:
             stats = transport.download_tree(remote, local, resume=resume, progress=transfer_progress)
-            report.items.append(_item_from_stats(remote, local, "directory", stats))
+            item = _item_from_stats(remote, local, "directory", stats)
+            report.items.append(item)
+            if item.status == "ok-with-exclusions":
+                for failure in item.failed_files:
+                    report.exclusions.append(
+                        {
+                            "stage": local_name,
+                            "path": failure.get("path"),
+                            "error": failure.get("error"),
+                            "policy": "excluded-from-verification-and-restore",
+                        }
+                    )
         except error_perm as exc:
             report.items.append(BackupItemReport(
                 remote_path=remote,
@@ -166,7 +199,7 @@ def backup_wordpress_ftp(
 
     transfer_problems: list[str] = []
     for item in report.items:
-        if item.status in {"partial", "transfer-failed"}:
+        if item.status == "transfer-failed":
             transfer_problems.append(
                 f"Incomplete remote backup: {item.remote_path} ({item.files_failed or 1} failed file(s))"
             )
@@ -174,13 +207,13 @@ def backup_wordpress_ftp(
                 transfer_problems.append(f"  - {failure.get('path')}: {failure.get('error')}")
 
     report_file = backup_root / "backup-report.json"
-    # First write provides a stable report body for manifest hashing.
     report_file.write_text(json.dumps(asdict(report), indent=2, ensure_ascii=False), encoding="utf-8")
 
     manifest = write_manifest(backup_root)
     integrity_ok, integrity_problems = verify_manifest(backup_root, manifest)
     report.manifest_path = str(manifest)
     report.verified = integrity_ok and not transfer_problems
+    report.verified_with_exclusions = report.verified and bool(report.exclusions)
     report.verification_problems = [*integrity_problems, *transfer_problems]
 
     # Persist final status, then regenerate the manifest because backup-report.json changed.
@@ -189,8 +222,17 @@ def backup_wordpress_ftp(
     final_integrity_ok, final_integrity_problems = verify_manifest(backup_root, manifest)
     if not final_integrity_ok:
         report.verified = False
+        report.verified_with_exclusions = False
         report.verification_problems = [*final_integrity_problems, *transfer_problems]
 
     if progress:
-        progress({"phase": "verified", "stage": "manifest", "verified": report.verified})
+        progress(
+            {
+                "phase": "verified",
+                "stage": "manifest",
+                "verified": report.verified,
+                "with_exclusions": report.verified_with_exclusions,
+                "exclusions": len(report.exclusions),
+            }
+        )
     return report

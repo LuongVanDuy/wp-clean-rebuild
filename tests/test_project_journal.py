@@ -159,7 +159,9 @@ def test_journal_gui_has_three_project_tabs() -> None:
     assert "wpclean-journal-style" in html
 
 
-def test_launcher_uses_journal_entry() -> None:
+def test_launcher_keeps_journal_through_full_gui_entry() -> None:
     root = Path(__file__).resolve().parents[1]
     script = (root / "giaodien.ps1").read_text(encoding="utf-8-sig")
-    assert "python -m wpclean.gui_journal_entry" in script
+    assert "python -m wpclean.gui_fresh_entry" in script
+    fresh_entry = (root / "src" / "wpclean" / "gui_fresh_entry.py").read_text(encoding="utf-8")
+    assert "gui_journal_entry" in fresh_entry

@@ -8,14 +8,17 @@ import typer
 from .cli import console, _profile_transport
 from .entry import app
 from . import rebuild_execute as rebuild_engine
+from .htaccess_defaults import build_production_htaccess
 from .rebuild_execute import execute_rebuild
 from .rebuild_resume import import_database_with_diagnostics, resume_database_import
 from .site_config import load_site_profile
 
 
-# Use the diagnostic importer for normal rebuilds too. execute_rebuild resolves
-# _import_database from its module globals at runtime, so this keeps the existing
-# engine flow while preserving HTTP/PHP/MySQL error details.
+# Normal rebuilds use the same production-safe defaults as the recovery path:
+# - the user's confirmed LiteSpeed/Apache .htaccess template is generated fresh;
+# - database HTTP/PHP/MySQL errors preserve their diagnostic response body.
+# execute_rebuild resolves both names from rebuild_execute module globals at runtime.
+rebuild_engine.build_clean_htaccess = build_production_htaccess
 rebuild_engine._import_database = import_database_with_diagnostics
 
 
@@ -55,13 +58,13 @@ def rebuild_config(
         console.print("  1. Verify original backup + clean staging again")
         console.print("  2. Download/extract fresh WordPress core before the destructive boundary")
         console.print("  3. Wipe everything inside the configured WordPress root except .well-known")
-        console.print("  4. Upload fresh WordPress core + fresh wp-config.php + clean WordPress .htaccess")
+        console.print("  4. Upload fresh WordPress core + fresh wp-config.php + production LiteSpeed/Apache .htaccess")
         console.print("  5. Restore clean/uploads")
         if restore_backup_code:
             console.print("  6. [red]Restore backed-up plugins/themes/mu-plugins by explicit override[/red]")
         else:
             console.print("  6. Do not restore compromised-backup plugins/themes")
-        console.print("  7. Import clean/database/clean.sql through a temporary authenticated bridge")
+        console.print("  7. Import clean/database/clean.sql through a temporary authenticated bridge with detailed diagnostics")
         console.print("  8. Remove temporary import bridge/data and write execution report")
         console.print("\nTo execute, rerun with [bold]--execute[/bold].")
         return
@@ -143,7 +146,7 @@ def rebuild_config(
     console.print(f"Fresh core uploaded: {report.core_uploaded} files")
     console.print(f"Clean uploads restored: {report.uploads_uploaded} files")
     console.print(f"Fresh wp-config.php uploaded: {report.wp_config_uploaded}")
-    console.print(f"Clean .htaccess uploaded: {report.htaccess_uploaded}")
+    console.print(f"Production .htaccess uploaded: {report.htaccess_uploaded}")
     console.print(f"Database imported: {report.database_imported} ({report.database_statements} statements)")
     console.print(
         f"Temporary import cleanup: bridge_removed={report.temp_bridge_removed}, data_removed={report.temp_sql_removed}"

@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from wpclean.fresh_install import FreshInstallRequest, build_wp_config, _database_create_bridge, _wordpress_install_bridge
-from wpclean import gui_fresh_safe_entry  # noqa: F401 - activates full GUI + safety stack
+from wpclean import gui_fresh_safe_entry
 from wpclean.gui_ui import render_app
 
 
@@ -90,6 +90,12 @@ def test_temporary_php_bridges_do_not_embed_plaintext_secrets() -> None:
     assert "wp_install" in install_bridge
 
 
+def test_safe_entry_translates_dot_prefixed_bridges_for_http_compatibility() -> None:
+    assert gui_fresh_safe_entry._visible_bridge_name(".wpclean-db-abc.php") == "wpclean-db-abc.php"
+    assert gui_fresh_safe_entry._visible_bridge_name("/public_html/.wpclean-install-abc.php") == "/public_html/wpclean-install-abc.php"
+    assert gui_fresh_safe_entry._visible_bridge_name("/public_html/index.php") == "/public_html/index.php"
+
+
 def test_gui_exposes_separate_fresh_install_wizard() -> None:
     html = render_app("test-token")
 
@@ -110,3 +116,6 @@ def test_launcher_points_to_safe_fresh_gui_entry() -> None:
     safety = (root / "src" / "wpclean" / "gui_fresh_safe_entry.py").read_text(encoding="utf-8")
     assert "Preflight database PASS" in safety
     assert "trước destructive boundary" in safety
+    assert "does not create a normal Clean/Rebuild project" in safety
+    assert "Hoàn tất Fresh Install" in safety
+    assert "base._save_profile_after_install" not in safety

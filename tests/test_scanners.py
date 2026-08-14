@@ -21,6 +21,10 @@ def test_php_hidden_as_image_is_critical(tmp_path: Path):
     findings = scan_uploads(uploads)
     assert findings
     assert findings[0].score >= 80
+    assert findings[0].metadata["magic_type"] == "jpeg"
+    assert findings[0].metadata["php_offset"] >= 0
+    assert len(findings[0].metadata["sha256"]) == 64
+    assert "<?php" in findings[0].preview
 
 
 def test_bare_php_like_binary_bytes_do_not_flag_media(tmp_path: Path):
@@ -49,6 +53,8 @@ def test_zip_with_php_entry_is_reviewed_without_scanning_compressed_bytes(tmp_pa
     assert len(findings) == 1
     assert findings[0].score == 40
     assert findings[0].signals[0].name == "uploads.archive_executable"
+    assert findings[0].metadata["archive_executable_entries"] == ["plugin/test.php"]
+    assert len(findings[0].metadata["sha256"]) == 64
 
 
 def test_manifest_detects_tamper(tmp_path: Path):

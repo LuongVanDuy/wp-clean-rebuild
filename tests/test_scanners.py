@@ -63,7 +63,7 @@ def test_silence_is_golden_index_is_not_malware(tmp_path: Path):
     assert findings == []
 
 
-def test_zip_with_php_entry_is_reviewed_without_scanning_compressed_bytes(tmp_path: Path):
+def test_zip_is_preserved_in_backup_but_dropped_from_clean_restore(tmp_path: Path):
     uploads = tmp_path / "uploads"
     uploads.mkdir()
     archive_path = uploads / "archive.zip"
@@ -71,10 +71,13 @@ def test_zip_with_php_entry_is_reviewed_without_scanning_compressed_bytes(tmp_pa
         archive.writestr("plugin/test.php", "<?php echo 'x';")
     findings = scan_uploads(uploads)
     assert len(findings) == 1
-    assert findings[0].score == 40
-    assert findings[0].signals[0].name == "uploads.archive_executable"
-    assert findings[0].metadata["archive_executable_entries"] == ["plugin/test.php"]
-    assert len(findings[0].metadata["sha256"]) == 64
+    finding = findings[0]
+    assert finding.score == 30
+    assert finding.signals[0].name == "uploads.archive_restore_policy"
+    assert finding.metadata["restore_policy"] == "drop"
+    assert finding.recommended_action == "DROP FROM CLEAN RESTORE (ORIGINAL BACKUP KEPT)"
+    assert len(finding.metadata["sha256"]) == 64
+    assert archive_path.exists()
 
 
 def test_manifest_detects_tamper(tmp_path: Path):

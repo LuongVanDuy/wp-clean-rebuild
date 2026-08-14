@@ -36,12 +36,12 @@ def test_clean_mu_plugin_component_is_allowed(tmp_path: Path):
     assert report.components[0].blocked is False
 
 
-def test_known_malware_marker_blocks_mu_plugin(tmp_path: Path):
+def test_known_malware_marker_blocks_mu_plugin(tmp_path: Path, synthetic_code_samples):
     root = tmp_path / "backup"
     mu = root / "mu-plugins"
     mu.mkdir(parents=True)
     (mu / "bad.php").write_text(
-        "<?php /* Plugin Name: Bold Recorder Bit */ $x = 'vivid-toolkit-tap';",
+        str(synthetic_code_samples["known_marker_php"]),
         encoding="utf-8",
     )
 
@@ -54,13 +54,13 @@ def test_known_malware_marker_blocks_mu_plugin(tmp_path: Path):
     assert report.blocked_components == 1
 
 
-def test_one_bad_file_blocks_whole_mu_plugin_directory(tmp_path: Path):
+def test_one_bad_file_blocks_whole_mu_plugin_directory(tmp_path: Path, synthetic_code_samples):
     root = tmp_path / "backup"
     component = root / "mu-plugins" / "vendor-tool"
     component.mkdir(parents=True)
     (component / "loader.php").write_text("<?php add_action('init', 'vendor_init');", encoding="utf-8")
     (component / "payload.php").write_text(
-        "<?php eval(base64_decode('" + ("A" * 900) + "'));",
+        str(synthetic_code_samples["long_obfuscated_php"]),
         encoding="utf-8",
     )
 
@@ -101,12 +101,15 @@ def test_backup_exclusion_blocks_matching_mu_component(tmp_path: Path):
     assert any("BACKUP EXCLUDED" in item for item in report.components[0].unreadable_files)
 
 
-def test_run_stage_uploads_only_clean_components(tmp_path: Path, monkeypatch):
+def test_run_stage_uploads_only_clean_components(tmp_path: Path, monkeypatch, synthetic_code_samples):
     root = tmp_path / "backup"
     mu = root / "mu-plugins"
     mu.mkdir(parents=True)
     (mu / "safe.php").write_text("<?php add_action('init', 'safe_init');", encoding="utf-8")
-    (mu / "bad.php").write_text("<?php $x='vivid-toolkit-tap';", encoding="utf-8")
+    (mu / "bad.php").write_text(
+        str(synthetic_code_samples["known_vivid_php"]),
+        encoding="utf-8",
+    )
 
     uploaded: list[str] = []
 

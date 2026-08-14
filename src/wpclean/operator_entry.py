@@ -8,7 +8,35 @@ from rich.prompt import Prompt
 from . import operator_wizard as wizard
 from . import plugin_workflow as plugin_module
 from . import rebuild_entry as theme_module
+from .mu_plugin_restore import run_mu_plugin_stage
 from .operator_locale import VietnameseConsoleProxy
+
+
+_original_infer_status = wizard._infer_status
+_original_show_status = wizard._show_status
+_original_stage_plugin = wizard._stage_plugin
+
+
+def _infer_status(paths) -> dict[str, Any]:
+    status = _original_infer_status(paths)
+    execution = wizard._read_json(paths["execute"])
+    mu_stage = execution.get("mu_plugin_stage") if isinstance(execution.get("mu_plugin_stage"), dict) else {}
+    status["mu_plugin"] = mu_stage
+    status["mu_plugin_done"] = bool(mu_stage.get("completed"))
+    status["mu_plugin_blocked"] = int(mu_stage.get("blocked_components") or 0)
+    status["mu_plugin_uploaded"] = int(mu_stage.get("files_uploaded") or 0)
+    return status
+
+
+def _show_status(profile, paths, status: dict[str, Any]) -> None:
+    _original_show_status(profile, paths, status)
+    if status.get("mu_plugin_done"):
+        detail = f"đã xử lý | upload {status.get('mu_plugin_uploaded', 0)} file"
+        if status.get("mu_plugin_blocked"):
+            detail += f" | chặn {status['mu_plugin_blocked']} component nghi vấn"
+        wizard.console.print(f"[green]✓[/green] MU-plugin: {detail}")
+    elif status.get("rebuild_ready"):
+        wizard.console.print("[dim]·[/dim] MU-plugin: chưa quét/khôi phục")
 
 
 def _next_stage(status: dict[str, Any]) -> str:
@@ -21,7 +49,11 @@ def _next_stage(status: dict[str, Any]) -> str:
     if status["rebuild_ready"]:
         if not status["theme_done"]:
             return "theme"
-        if not status["plugin_done"]:
+        # The existing run loop already owns the "plugin" stage. Our patched
+        # plugin handler runs normal plugins first, then MU-plugins immediately
+        # afterwards. Returning "plugin" also safely resumes an unfinished
+        # MU-plugin stage without repeating earlier destructive work.
+        if not status["plugin_done"] or not status.get("mu_plugin_done", False):
             return "plugin"
         if status["plugin_manual"] and not status["manual_plugins_ack"]:
             return "manual-plugins"
@@ -38,6 +70,83 @@ def _next_stage(status: dict[str, Any]) -> str:
     if not status["preflight_ready"]:
         return "preflight"
     return "rebuild"
+
+
+def _stage_plugin(profile, transport, paths) -> None:
+    status = _infer_status(paths)
+    if not status["plugin_done"]:
+        _original_stage_plugin(profile, transport, paths)
+        status = _infer_status(paths)
+
+    if not status["plugin_done"]:
+        raise wizard.TamDungQuyTrinh(
+            "Plugin thường chưa hoàn tất. Chạy BATDAU lại để tiếp tục trước khi xử lý MU-plugin."
+        )
+
+    if status.get("mu_plugin_done"):
+        wizard.console.print("[green]✓ MU-plugin đã được quét/khôi phục ở lần chạy trước.[/green]")
+        return
+
+    wizard.console.print("\n[bold cyan]BƯỚC 11B — MU-PLUGIN[/bold cyan]")
+    wizard.console.print(
+        "Backup MU-plugin chỉ dùng làm nguồn kiểm tra. Component nào sạch mới được upload; "
+        "component có HIGH/CRITICAL hoặc file không đọc được sẽ bị chặn toàn bộ."
+    )
+
+    with wizard.console.status("[cyan]Đang quét và khôi phục MU-plugin an toàn...[/cyan]", spinner="dots") as status_ui:
+        def progress(event: dict) -> None:
+            if event.get("phase") != "upload_mu_plugin":
+                return
+            current = str(event.get("current", ""))
+            if len(current) > 65:
+                current = "…" + current[-64:]
+            status_ui.update(f"[cyan]Đang upload MU-plugin sạch: {current}[/cyan]")
+
+        result = run_mu_plugin_stage(
+            profile=profile,
+            transport=transport,
+            backup_root=paths["backup"],
+            report_path=paths["execute"],
+            progress=progress,
+        )
+
+    if result.inventory_count == 0:
+        wizard.console.print("[green]✓ Backup không có MU-plugin cần khôi phục.[/green]")
+    else:
+        wizard.console.print(
+            f"Đã kiểm tra {result.inventory_count} component | sạch={result.clean_components} | "
+            f"bị chặn={result.blocked_components} | file đã upload={result.files_uploaded}"
+        )
+
+    blocked = [item for item in result.components if item.blocked]
+    if blocked:
+        wizard.console.print("\n[bold yellow]MU-plugin bị chặn, KHÔNG upload:[/bold yellow]")
+        for component in blocked:
+            wizard.console.print(f" - [yellow]{component.name}[/yellow]")
+            for finding in component.findings:
+                if finding.score < 60:
+                    continue
+                relative = finding.path
+                try:
+                    relative = str(wizard.Path(finding.path).relative_to(wizard.Path(result.source_path)))
+                except Exception:
+                    pass
+                wizard.console.print(
+                    f"   [red]{finding.severity} {finding.score}/100[/red] {relative}: "
+                    + "; ".join(finding.reasons)
+                )
+            for unreadable in component.unreadable_files[:10]:
+                wizard.console.print(f"   [red]Không an toàn/không đọc được:[/red] {unreadable}")
+        wizard.console.print(
+            "[cyan]Các component trên vẫn nằm nguyên trong backup gốc nhưng không được đưa trở lại website.[/cyan]"
+        )
+
+    if not result.completed:
+        raise wizard.TamDungQuyTrinh(
+            "MU-plugin stage chưa hoàn tất do lỗi đọc/upload. Chạy BATDAU lại hoặc báo kỹ thuật kiểm tra report mu-plugin-stage.json."
+        )
+
+    wizard.console.print("[green]✓ MU-plugin stage hoàn tất; chỉ component vượt qua scan mới được upload.[/green]")
 
 
 def _stage_manual_plugins(profile, paths, status: dict[str, Any]) -> None:
@@ -72,9 +181,14 @@ theme_module.console = _operator_console
 plugin_module.console = _operator_console
 
 # Patch the original wizard module in one place so its run loop uses the hardened
-# routing and the cleaner Vietnamese manual-plugin prompt.
+# routing, adds MU-plugin handling immediately after plugins, and keeps the
+# existing tested workflow engine intact.
+wizard._infer_status = _infer_status
+wizard._show_status = _show_status
 wizard._next_stage = _next_stage
+wizard._stage_plugin = _stage_plugin
 wizard._stage_manual_plugins = _stage_manual_plugins
+wizard.STAGE_LABELS["plugin"] = "Cài plugin sạch + quét/khôi phục MU-plugin"
 
 
 run = wizard.run

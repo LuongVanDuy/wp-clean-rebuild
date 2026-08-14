@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import re
 import zipfile
 from pathlib import Path
@@ -11,8 +12,6 @@ EXECUTABLE_SUFFIXES = {".php", ".phtml", ".phar", ".php3", ".php4", ".php5", ".p
 MEDIA_SUFFIXES = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif", ".svg", ".pdf", ".mp4", ".mov", ".mp3", ".wav", ".ico"}
 TEXT_SUFFIXES = {".txt", ".html", ".htm", ".js", ".css", ".xml", ".json", ".htaccess", ".ini"}
 
-# Do not match a bare '<?' in binary media. Random compressed image bytes can
-# contain that pair frequently enough to produce large false-positive bursts.
 STRICT_PHP_TOKEN = re.compile(br"<\?(?:php\b|=)", re.I)
 SHORT_PHP_TOKEN = re.compile(br"<\?(?!xml\b)", re.I)
 PHP_CODE_HINT = re.compile(
@@ -24,8 +23,43 @@ ARCHIVE_EXECUTABLE = re.compile(r"(?:^|/)[^/]+\.(?:php\d*|phtml|phar)$", re.I)
 ARCHIVE_DOUBLE_EXT = re.compile(r"\.(?:jpe?g|png|gif|webp|avif|pdf)\.(?:php\d*|phtml|phar)$", re.I)
 
 
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as fh:
+        while chunk := fh.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _magic_type(head: bytes) -> str:
+    if head.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "png"
+    if head.startswith(b"\xff\xd8\xff"):
+        return "jpeg"
+    if head.startswith((b"GIF87a", b"GIF89a")):
+        return "gif"
+    if len(head) >= 12 and head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return "webp"
+    if len(head) >= 12 and head[4:8] == b"ftyp" and b"avif" in head[8:32]:
+        return "avif"
+    if head.startswith(b"%PDF-"):
+        return "pdf"
+    if head.startswith(b"PK\x03\x04"):
+        return "zip"
+    if head.lstrip().startswith(b"<svg") or b"<svg" in head[:512].lower():
+        return "svg"
+    return "unknown"
+
+
+def _safe_preview(data: bytes, limit: int = 220) -> str:
+    text = data.decode("utf-8", errors="replace")
+    text = " ".join(text.split())
+    if len(text) > limit:
+        text = text[:limit] + "…"
+    return text
+
+
 def _is_benign_upload_index(path: Path, data: bytes) -> bool:
-    """Recognize the common no-op index.php guard used to prevent directory listing."""
     if path.name.lower() != "index.php" or len(data) > 2048:
         return False
     lowered = data.lower()
@@ -38,30 +72,46 @@ def _is_benign_upload_index(path: Path, data: bytes) -> bool:
     return dangerous.search(data) is None
 
 
-def _php_payload_in_media(data: bytes) -> bool:
-    """Require a real PHP opening tag plus nearby PHP-like syntax for binary media."""
-    for match in STRICT_PHP_TOKEN.finditer(data):
-        window = data[match.start() : match.start() + 4096]
-        if match.group(0).lower().startswith(b"<?="):
-            # Short echo tags are already highly specific and should not occur in media.
-            return True
-        if PHP_CODE_HINT.search(window):
-            return True
-    return False
+def _find_php_payload(path: Path) -> tuple[int, str] | None:
+    """Return exact byte offset and a short sanitized preview for a PHP payload in media.
+
+    Scans in chunks with overlap so appended payloads near the end of larger media
+    files are detected without loading the whole file into memory.
+    """
+    chunk_size = 256 * 1024
+    overlap = 4096
+    carry = b""
+    absolute = 0
+
+    with path.open("rb") as fh:
+        while chunk := fh.read(chunk_size):
+            data = carry + chunk
+            base = max(0, absolute - len(carry))
+            for match in STRICT_PHP_TOKEN.finditer(data):
+                window = data[match.start() : match.start() + 4096]
+                if match.group(0).lower().startswith(b"<?=") or PHP_CODE_HINT.search(window):
+                    start = max(0, match.start() - 48)
+                    end = min(len(data), match.start() + 320)
+                    return base + match.start(), _safe_preview(data[start:end])
+            carry = data[-overlap:]
+            absolute += len(chunk)
+    return None
 
 
-def _scan_zip(path: Path) -> list[Signal]:
+def _scan_zip(path: Path) -> tuple[list[Signal], list[str]]:
     signals: list[Signal] = []
+    evidence: list[str] = []
     try:
         with zipfile.ZipFile(path) as archive:
             names = archive.namelist()
     except (OSError, zipfile.BadZipFile, zipfile.LargeZipFile):
-        return signals
+        return signals, evidence
 
     executable_entries = [name for name in names if ARCHIVE_EXECUTABLE.search(name)]
     double_ext_entries = [name for name in names if ARCHIVE_DOUBLE_EXT.search(name)]
 
     if double_ext_entries:
+        evidence = double_ext_entries[:10]
         signals.append(
             Signal(
                 "uploads.archive_double_extension",
@@ -70,6 +120,7 @@ def _scan_zip(path: Path) -> list[Signal]:
             )
         )
     elif executable_entries:
+        evidence = executable_entries[:10]
         signals.append(
             Signal(
                 "uploads.archive_executable",
@@ -77,7 +128,7 @@ def _scan_zip(path: Path) -> list[Signal]:
                 f"ZIP contains PHP-like executable file(s), e.g. {executable_entries[0]}",
             )
         )
-    return signals
+    return signals, evidence
 
 
 def scan_uploads(root: Path) -> list[Finding]:
@@ -90,10 +141,12 @@ def scan_uploads(root: Path) -> list[Finding]:
         score = 0
         suffix = path.suffix.lower()
         name = path.name.lower()
+        metadata: dict[str, object] = {"suffix": suffix, "size": path.stat().st_size}
+        preview = ""
 
         try:
-            # 256 KiB is enough for a useful first-pass payload check while keeping scans fast.
-            head = path.read_bytes()[:262144]
+            with path.open("rb") as fh:
+                head = fh.read(262144)
         except OSError:
             continue
 
@@ -108,11 +161,18 @@ def scan_uploads(root: Path) -> list[Finding]:
             score += 30
 
         if suffix == ".zip":
-            archive_signals = _scan_zip(path)
+            archive_signals, archive_entries = _scan_zip(path)
             signals.extend(archive_signals)
             score += sum(signal.score for signal in archive_signals)
+            if archive_entries:
+                metadata["archive_executable_entries"] = archive_entries
         elif suffix in MEDIA_SUFFIXES:
-            if _php_payload_in_media(head):
+            try:
+                payload = _find_php_payload(path)
+            except OSError:
+                payload = None
+            if payload:
+                offset, preview = payload
                 signals.append(
                     Signal(
                         "uploads.php_content",
@@ -121,6 +181,8 @@ def scan_uploads(root: Path) -> list[Finding]:
                     )
                 )
                 score += 80
+                metadata["php_offset"] = offset
+                metadata["magic_type"] = _magic_type(head[:64])
         elif suffix in EXECUTABLE_SUFFIXES:
             if SHORT_PHP_TOKEN.search(head):
                 signals.append(Signal("uploads.php_content", 35, "Executable file contains a PHP opening token."))
@@ -132,6 +194,10 @@ def scan_uploads(root: Path) -> list[Finding]:
 
         score = min(score, 100)
         if score >= 30:
+            try:
+                metadata["sha256"] = _sha256(path)
+            except OSError:
+                pass
             findings.append(
                 Finding(
                     "uploads",
@@ -139,7 +205,8 @@ def scan_uploads(root: Path) -> list[Finding]:
                     score,
                     severity_for(score),
                     signals,
-                    metadata={"suffix": suffix, "size": path.stat().st_size},
+                    preview=preview,
+                    metadata=metadata,
                 )
             )
     return findings

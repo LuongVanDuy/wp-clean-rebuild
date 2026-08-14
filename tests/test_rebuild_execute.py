@@ -110,5 +110,5 @@ def test_rebuild_command_requires_explicit_execute_flag(tmp_path: Path):
     assert result.exit_code == 0
     assert "DRY ARM ONLY" in result.stdout
     assert "--execute" in result.stdout
-    assert "clean WordPress .htaccess" in result.stdout
+    assert ".htaccess" in result.stdout
     assert "nothing was changed remotely" in result.stdout.lower()

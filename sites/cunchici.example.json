@@ -1,0 +1,11 @@
+{
+  "host": "cunchici.vn",
+  "username": "cunchici",
+  "password": "",
+  "protocol": "ftp",
+  "port": 21,
+  "remotePath": "/domains/cunchici.vn/public_html",
+  "passive": true,
+  "workers": 6,
+  "blockMb": 1
+}

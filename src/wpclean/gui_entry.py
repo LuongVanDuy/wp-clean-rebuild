@@ -14,19 +14,19 @@ _ORIGINAL_RENDER_APP = gui_ui.render_app
 
 
 _READABILITY_CSS = r'''<style id="wpclean-readability">
-html,body{font-size:15px}
-.brand strong{font-size:16px}.brand span{font-size:13px}.navbtn{font-size:14px}.side-note{font-size:13px}
-.top-title{font-size:16px}.btn{font-size:14px}.page-head h1{font-size:28px}.page-head p{font-size:14px}
-.summary-item span{font-size:12px}.summary-item b{font-size:21px}.panel-head h2{font-size:16px}.search{font-size:14px}
-.project-header{font-size:12px}.project-name h3{font-size:15px}.project-name p{font-size:13px}.status{font-size:12px}
-.current-step{font-size:13px}.progress-num{font-size:12px}.open-btn{font-size:13px}.empty{font-size:14px}
-.drawer-title h2{font-size:22px}.drawer-title p{font-size:13px}.section-title{font-size:13px}
-.kv span{font-size:12px}.kv b{font-size:13px}.step label{font-size:13px}.step small{font-size:12px}.stepdot{font-size:11px}
-.action-card h3{font-size:15px}.action-card p{font-size:13px}.confirm-input{font-size:14px}
-.check b{font-size:13px}.check span{font-size:12px}.job h3{font-size:14px}.job p{font-size:12px}.jobcur{font-size:12px}
-.errorbox{font-size:12px}.logs div{font-size:11px}.foot-danger p{font-size:12px}
-.modalhead h2{font-size:21px}.modalhead p{font-size:13px}.field label{font-size:12px}.field input,.field select{font-size:14px}
-.hint{font-size:11px}.toast{font-size:13px}
+html,body{font-size:16px;line-height:1.45}
+.brand strong{font-size:18px}.brand span{font-size:14px}.navbtn{font-size:16px}.side-note{font-size:14px}
+.top-title{font-size:18px}.btn{font-size:15px}.page-head h1{font-size:32px}.page-head p{font-size:16px}
+.summary-item span{font-size:13px}.summary-item b{font-size:24px}.panel-head h2{font-size:18px}.search{font-size:15px}
+.project-header{font-size:13px}.project-name h3{font-size:17px}.project-name p{font-size:15px}.status{font-size:13px}
+.current-step{font-size:15px}.progress-num{font-size:13px}.open-btn{font-size:15px}.empty{font-size:16px}
+.drawer-title h2{font-size:25px}.drawer-title p{font-size:15px}.section-title{font-size:14px}
+.kv span{font-size:13px}.kv b{font-size:15px}.step label{font-size:15px}.step small{font-size:13px}.stepdot{font-size:12px}
+.action-card h3{font-size:17px}.action-card p{font-size:15px}.confirm-input{font-size:15px}
+.check b{font-size:15px}.check span{font-size:13px}.job h3{font-size:16px}.job p{font-size:14px}.jobcur{font-size:13px}
+.errorbox{font-size:13px}.logs div{font-size:12px}.foot-danger p{font-size:13px}
+.modalhead h2{font-size:24px}.modalhead p{font-size:15px}.field label{font-size:14px}.field input,.field select{font-size:16px}
+.hint{font-size:12px}.toast{font-size:14px}
 </style>'''
 
 

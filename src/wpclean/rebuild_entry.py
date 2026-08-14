@@ -15,9 +15,11 @@ from .rebuild_resume import import_database_with_diagnostics, resume_database_im
 from .site_config import load_site_profile
 from .theme_restore import (
     ThemeStageResult,
+    existing_child_theme_repair,
     install_child_theme,
     install_flatsome,
     plan_theme_stage,
+    prepare_child_theme_repair,
     scan_child_theme,
 )
 
@@ -41,6 +43,14 @@ def _save_theme_stage(report_path: Path, result: ThemeStageResult) -> None:
         payload = {}
     payload["theme_stage"] = result.to_dict()
     report_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def _display_relative(location: str, root: Path) -> str:
+    path = Path(location)
+    try:
+        return str(path.relative_to(root))
+    except ValueError:
+        return str(path)
 
 
 def _run_theme_stage(
@@ -127,7 +137,7 @@ def _run_theme_stage(
     result.child_prompted = True
     console.print(f"\n[yellow]Website đang sử dụng theme con: {active.stylesheet}[/yellow]")
     install_child = typer.confirm(
-        f"Bạn có muốn cài lại theme con {active.stylesheet} từ backup không?",
+        f"Bạn có muốn cài lại theme con {active.stylesheet} không?",
         default=False,
     )
     if not install_child:
@@ -136,36 +146,68 @@ def _run_theme_stage(
         _save_theme_stage(report_path, result)
         return result
 
-    console.print("Đang quét toàn bộ theme con trước khi cho phép upload...")
     assert child_root is not None
+    repair_root = existing_child_theme_repair(backup_root, active.stylesheet)
+    if repair_root is not None:
+        scan_root = repair_root
+        scan_backup_root = None
+        result.child_scan_source = "repair-working-copy"
+        result.child_repair_workspace = str(repair_root)
+        console.print(f"[cyan]Phát hiện bản theme kỹ thuật đang sửa: {repair_root}[/cyan]")
+        console.print("Đang quét lại working-copy; backup gốc sẽ không bị sửa hoặc ghi đè.")
+    else:
+        scan_root = child_root
+        scan_backup_root = backup_root
+        result.child_scan_source = "immutable-backup"
+        console.print("Đang quét theme con từ immutable backup trước khi cho phép upload...")
+
     child_scan = scan_child_theme(
-        child_root,
+        scan_root,
         slug=active.stylesheet,
-        backup_root=backup_root,
+        backup_root=scan_backup_root,
     )
     result.child_scan = child_scan.to_dict()
     console.print(f"Child-theme files scanned: {child_scan.files_scanned}")
 
     if child_scan.unreadable_files:
-        console.print("[red]Child theme scan BLOCKED: có file không đọc được hoặc từng bị loại khỏi backup.[/red]")
+        console.print("[red]File không đọc được / backup không đầy đủ:[/red]")
         for path in child_scan.unreadable_files[:20]:
             console.print(f" - [red]{path}[/red]")
 
     if child_scan.findings:
-        console.print("Child-theme static scan findings:")
+        console.print("[bold yellow]File nghi vấn cần kỹ thuật kiểm tra:[/bold yellow]")
         for finding in child_scan.findings:
             style = "red" if finding.score >= 60 else "yellow"
             reasons = "; ".join(signal.reason for signal in finding.signals)
+            display_path = _display_relative(finding.location, scan_root)
             console.print(
                 f" - [{style}]{finding.severity.value} {finding.score}/100[/{style}] "
-                f"{finding.location}: {reasons}"
+                f"{display_path}: {reasons}"
             )
 
     if child_scan.blocked:
-        result.warnings.append("Child theme restore blocked by static malware/unreadable-file gate.")
-        console.print("[bold red]KHÔNG UPLOAD THEME CON.[/bold red]")
+        working_copy, created = prepare_child_theme_repair(
+            backup_root,
+            child_root,
+            child_scan,
+            scan_root=scan_root,
+        )
+        result.child_repair_workspace = str(working_copy)
+        result.child_repair_created = created
+        result.warnings.append("Child theme restore blocked; repair workspace requires technical review.")
+
+        console.print("\n[bold red]KHÔNG UPLOAD THEME CON.[/bold red]")
+        if created:
+            console.print("[green]Đã tạo một bản working copy riêng cho kỹ thuật sửa.[/green]")
+        else:
+            console.print("[cyan]Working copy đã tồn tại; tool KHÔNG ghi đè các thay đổi của kỹ thuật.[/cyan]")
+        console.print(f"Theme cần sửa: [bold]{working_copy}[/bold]")
+        console.print(f"Danh sách file nghi vấn: [bold]{working_copy.parent / 'SUSPECT_FILES.txt'}[/bold]")
+        console.print(f"Scan report: {working_copy.parent / 'scan-report.json'}")
+        console.print(f"Backup gốc giữ nguyên: {child_root}")
         console.print(
-            "[bold yellow]Vui lòng liên hệ kỹ thuật kiểm tra lại theme trước khi upload.[/bold yellow]"
+            "[bold yellow]Vui lòng kỹ thuật sửa trong working-copy, sau đó chạy lại cùng lệnh. "
+            "Tool sẽ quét lại working-copy; chỉ PASS mới upload theme con.[/bold yellow]"
         )
         _save_theme_stage(report_path, result)
         return result
@@ -173,7 +215,10 @@ def _run_theme_stage(
     console.print(
         "[green]✓ Theme con scan PASS: không phát hiện HIGH/CRITICAL malware indicator và không có file unreadable.[/green]"
     )
-    console.print("[cyan]Theme con đã được xác nhận từ trước; bắt đầu upload tự động.[/cyan]")
+    if result.child_scan_source == "repair-working-copy":
+        console.print("[green]✓ Bản kỹ thuật sửa đã PASS; bắt đầu upload working-copy.[/green]")
+    else:
+        console.print("[cyan]Theme con đã được xác nhận; bắt đầu upload từ backup đã scan.[/cyan]")
 
     with console.status(f"[cyan]Uploading child theme {active.stylesheet}...[/cyan]", spinner="dots") as status:
         def child_progress(event: dict) -> None:
@@ -189,7 +234,7 @@ def _run_theme_stage(
         child_uploaded = install_child_theme(
             profile,
             transport,
-            child_root,
+            scan_root,
             active.stylesheet,
             progress=child_progress,
         )
@@ -244,7 +289,7 @@ def rebuild_config(
             console.print("  6. Do not restore compromised-backup plugins/themes")
         console.print("  7. Import clean/database/clean.sql through a temporary authenticated bridge with detailed diagnostics")
         console.print("  8. Remove temporary import bridge/data and write execution report")
-        console.print("  9. Detect active theme; offer trusted Flatsome, then ask before scanning/restoring Flatsome child theme")
+        console.print("  9. Detect active theme; install trusted Flatsome; child themes use immutable backup + repair workspace gate")
         console.print("\nTo execute, rerun with [bold]--execute[/bold].")
         return
 
@@ -356,6 +401,8 @@ def rebuild_config(
         console.print(
             f"Child theme {theme_result.child_theme_slug}: installed={theme_result.child_installed}"
         )
+    if theme_result.child_repair_workspace:
+        console.print(f"Child theme repair workspace: {theme_result.child_repair_workspace}")
     if theme_result.unsupported_theme:
         console.print(
             f"[yellow]Unsupported theme requires manual install: {theme_result.unsupported_theme}[/yellow]"
@@ -411,6 +458,8 @@ def rebuild_theme_config(
     console.print(f"Flatsome installed: {result.flatsome_installed}")
     if result.child_theme_detected:
         console.print(f"Child theme: {result.child_theme_slug} | installed={result.child_installed}")
+    if result.child_repair_workspace:
+        console.print(f"Repair workspace: {result.child_repair_workspace}")
     if result.unsupported_theme:
         console.print(f"Manual theme required: {result.unsupported_theme}")
     console.print(f"Execution report updated: {report_path}")

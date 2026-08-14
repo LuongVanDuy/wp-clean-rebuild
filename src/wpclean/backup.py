@@ -60,10 +60,9 @@ def write_manifest(root: Path) -> Path:
 def verify_manifest(root: Path, manifest_path: Path | None = None) -> tuple[bool, list[str]]:
     """Verify file integrity and, for full backups, minimum completeness.
 
-    Before the database stage exists this behaves as an integrity-only check so a
-    filesystem backup can be verified independently. Once database/original.sql
-    exists, the backup is treated as a full backup and required rebuild artifacts
-    must also be present.
+    Files explicitly marked ``ok-with-exclusions`` in backup-report.json are not
+    expected to exist locally and are intentionally never restored. Whole-stage
+    failures and required artifact failures still make the recovery set incomplete.
     """
     manifest_path = manifest_path or root / "manifest.json"
     raw = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -80,8 +79,6 @@ def verify_manifest(root: Path, manifest_path: Path | None = None) -> tuple[bool
         if actual != entry["sha256"]:
             problems.append(f"hash mismatch: {entry['path']}")
 
-    # A database dump marks this as a full backup. Integrity alone is not enough:
-    # required filesystem stages must also have been captured.
     if (root / "database" / "original.sql").is_file():
         completeness = verify_backup_completeness(root, require_database=True)
         problems.extend(f"incomplete: {problem}" for problem in completeness.problems)
@@ -116,14 +113,17 @@ def verify_backup_completeness(root: Path, *, require_database: bool = True) -> 
             for item in report.get("items", []):
                 remote = str(item.get("remote_path", ""))
                 status = str(item.get("status", ""))
-                # These are legitimately optional on many WordPress installations.
                 optional = (
                     remote.endswith("/wp-content/mu-plugins")
                     or remote.endswith("/php.ini")
                     or remote.endswith("/.user.ini")
                     or remote.endswith("/robots.txt")
                 )
-                if status != "ok" and not optional:
+                # A directory can be complete enough for clean rebuild while
+                # explicitly excluding individual unreadable files. Those files
+                # are recorded in the report and are never restored.
+                accepted = status in {"ok", "ok-with-exclusions"}
+                if not accepted and not optional:
                     problems.append(
                         f"backup stage incomplete: {remote or 'unknown'} ({status or 'unknown'})"
                     )

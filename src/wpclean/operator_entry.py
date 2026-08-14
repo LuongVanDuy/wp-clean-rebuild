@@ -41,7 +41,20 @@ def _show_status(profile, paths, status: dict[str, Any]) -> None:
 
 def _next_stage(status: dict[str, Any]) -> str:
     """Resume from the furthest trusted stage; never move backward after rebuild."""
-    if status["final_status"] in {"PASS", "PASS WITH WARNINGS"}:
+    final_ok = status["final_status"] in {"PASS", "PASS WITH WARNINGS"}
+
+    # A final PASS created before MU-plugin support is not sufficient. Existing
+    # projects must run the newly introduced MU-plugin gate once, then final
+    # verification is regenerated after any clean MU-plugin upload.
+    if final_ok and (
+        not status.get("rebuild_ready")
+        or (
+            status.get("theme_done")
+            and status.get("plugin_done")
+            and status.get("mu_plugin_done", False)
+            and (not status.get("plugin_manual") or status.get("manual_plugins_ack"))
+        )
+    ):
         return "done"
 
     # Once core/database rebuild is proven complete, backup/clean/preflight are
@@ -146,7 +159,12 @@ def _stage_plugin(profile, transport, paths) -> None:
             "MU-plugin stage chưa hoàn tất do lỗi đọc/upload. Chạy BATDAU lại hoặc báo kỹ thuật kiểm tra report mu-plugin-stage.json."
         )
 
+    # Any MU-plugin upload changes the live runtime after an earlier final check.
+    # Force final verification to run again even when the project had PASS before
+    # this stage was introduced.
+    paths["final"].unlink(missing_ok=True)
     wizard.console.print("[green]✓ MU-plugin stage hoàn tất; chỉ component vượt qua scan mới được upload.[/green]")
+    wizard.console.print("[cyan]Kết quả kiểm tra cuối cũ (nếu có) đã được bỏ để website được verify lại sau MU-plugin.[/cyan]")
 
 
 def _stage_manual_plugins(profile, paths, status: dict[str, Any]) -> None:

@@ -48,20 +48,11 @@ def _ensure_root(transport, remote_path: str) -> None:
             client.close()
 
 
-def _run_bridge(transport, req: FreshInstallRequest, php: str) -> None:
+def _upload_and_call(transport, req: FreshInstallRequest, php_factory) -> None:
     token = secrets.token_urlsafe(32)
     filename = f"wpclean-preflight-{secrets.token_hex(8)}.php"
     remote = str(PurePosixPath(req.remote_path) / filename)
-    # php is built with a placeholder token, so rebuild it at the caller with this token.
-    raise RuntimeError("internal bridge token mismatch")
-
-
-def _upload_and_call(transport, req: FreshInstallRequest, php_factory, label: str) -> None:
-    token = secrets.token_urlsafe(32)
-    filename = f"wpclean-preflight-{secrets.token_hex(8)}.php"
-    remote = str(PurePosixPath(req.remote_path) / filename)
-    php = php_factory(token)
-    _upload_text(transport, remote, php)
+    _upload_text(transport, remote, php_factory(token))
     try:
         _call_bridge(req.site_url, filename, token)
     finally:
@@ -72,12 +63,12 @@ def _preflight_database(req: FreshInstallRequest, transport, job) -> None:
     _ensure_root(transport, req.remote_path)
     if req.db_mode == "create":
         job.log("Preflight: kiểm tra quyền MySQL và tạo database/user trước destructive boundary", req.secrets)
-        _upload_and_call(transport, req, lambda token: _database_create_bridge(req, token), "create")
+        _upload_and_call(transport, req, lambda token: _database_create_bridge(req, token))
         job.log("Preflight: xác minh database user mới đăng nhập được và database đang rỗng", req.secrets)
-        _upload_and_call(transport, req, lambda token: _database_test_bridge(req, token), "test")
+        _upload_and_call(transport, req, lambda token: _database_test_bridge(req, token))
     else:
         job.log("Preflight: kiểm tra database có sẵn trước destructive boundary", req.secrets)
-        _upload_and_call(transport, req, lambda token: _database_test_bridge(req, token), "test")
+        _upload_and_call(transport, req, lambda token: _database_test_bridge(req, token))
     job.log("Preflight database PASS · kết nối được và database rỗng", req.secrets)
 
 

@@ -88,17 +88,58 @@ def rebuild_preflight(
     console.print(f"Clean staging: {backup_root / 'clean'}")
     console.print("[cyan]This command is read-only on the remote site. Nothing will be deleted or uploaded.[/cyan]")
 
-    try:
-        report = run_rebuild_preflight(
-            host=profile.host,
-            transport=transport,
-            remote_root=remote_root,
-            backup_root=backup_root,
-            report_path=report_path,
-        )
-    except (ValueError, RuntimeError) as exc:
-        console.print(f"[red]Rebuild preflight blocked:[/red] {exc}")
-        raise typer.Exit(code=2) from exc
+    with console.status("[cyan]Starting rebuild preflight...[/cyan]", spinner="dots") as status:
+        def on_progress(event: dict) -> None:
+            phase = event.get("phase")
+            if phase == "verify_original":
+                status.update("[cyan]Verifying original backup SHA-256...[/cyan]")
+                return
+            if phase == "verify_clean":
+                status.update("[cyan]Verifying clean staging SHA-256...[/cyan]")
+                return
+            if phase == "inventory_start":
+                status.update("[cyan]Scanning remote WordPress filesystem over FTP...[/cyan]")
+                return
+            if phase == "inventory":
+                inventory_phase = event.get("inventory_phase")
+                if inventory_phase == "discover":
+                    dirs = event.get("dirs_scanned", 0)
+                    files = event.get("files_found", 0)
+                    current = str(event.get("current_dir", ""))
+                    if len(current) > 70:
+                        current = "…" + current[-69:]
+                    status.update(
+                        f"[cyan]Remote scan: dirs={dirs} | files={files} | {current}[/cyan]"
+                    )
+                elif inventory_phase == "discovered":
+                    files = event.get("files_found", 0)
+                    dirs = event.get("dirs_scanned", 0)
+                    status.update(
+                        f"[cyan]Remote inventory complete: dirs={dirs} | files={files}. Classifying...[/cyan]"
+                    )
+                return
+            if phase == "classify":
+                status.update(
+                    f"[cyan]Classifying {event.get('files_found', 0)} remote files against backup coverage...[/cyan]"
+                )
+                return
+            if phase == "complete":
+                status.update(
+                    f"[cyan]Preflight analysis complete: files={event.get('files_found', 0)} | blocked={event.get('blocked_files', 0)}[/cyan]"
+                )
+
+        try:
+            report = run_rebuild_preflight(
+                host=profile.host,
+                transport=transport,
+                remote_root=remote_root,
+                backup_root=backup_root,
+                report_path=report_path,
+                progress=on_progress,
+            )
+        except (ValueError, RuntimeError) as exc:
+            console.print(f"[red]Rebuild preflight blocked:[/red] {exc}")
+            raise typer.Exit(code=2) from exc
 
     console.print("\n[green]✓ Original backup verified[/green]")
     console.print("[green]✓ Clean staging verified[/green]")

@@ -3,10 +3,14 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from ftplib import error_perm
 from pathlib import Path, PurePosixPath
+from typing import Callable
 import json
 
 from .backup import verify_manifest, write_manifest
 from .transport import FTPTransport, TransferStats
+
+
+BackupProgressCallback = Callable[[dict], None]
 
 
 @dataclass(slots=True)
@@ -72,13 +76,9 @@ def backup_wordpress_ftp(
     backup_root: Path,
     *,
     resume: bool = True,
+    progress: BackupProgressCallback | None = None,
 ) -> RemoteBackupReport:
-    """Back up WordPress user data/reference code over FTP/FTPS.
-
-    Database export is deliberately not attempted here: FTP is a filesystem
-    protocol. Database backup belongs to a separate DB adapter (SSH/WP-CLI,
-    direct MySQL, or a hosting API).
-    """
+    """Back up WordPress user data/reference code over FTP/FTPS."""
     backup_root.mkdir(parents=True, exist_ok=True)
     report = RemoteBackupReport(
         transport="ftps" if transport.config.tls else "ftp",
@@ -89,8 +89,15 @@ def backup_wordpress_ftp(
     for remote_rel, local_name in REFERENCE_DIRS:
         remote = _join(remote_root, remote_rel)
         local = backup_root / local_name
+        if progress:
+            progress({"phase": "stage", "stage": local_name, "remote_path": remote})
+
+        def transfer_progress(event: dict, stage: str = local_name) -> None:
+            if progress:
+                progress({**event, "stage": stage})
+
         try:
-            stats = transport.download_tree(remote, local, resume=resume)
+            stats = transport.download_tree(remote, local, resume=resume, progress=transfer_progress)
             report.items.append(_item_from_stats(remote, local, "directory", stats))
         except error_perm as exc:
             report.items.append(BackupItemReport(
@@ -100,15 +107,21 @@ def backup_wordpress_ftp(
                 status="missing-or-denied",
                 error=str(exc),
             ))
+            if progress:
+                progress({"phase": "stage_skipped", "stage": local_name, "error": str(exc)})
 
     config_dir = backup_root / "config"
     config_dir.mkdir(parents=True, exist_ok=True)
+    if progress:
+        progress({"phase": "stage", "stage": "config", "remote_path": remote_root})
     for name in CONFIG_FILES:
         remote = _join(remote_root, name)
         local = config_dir / name
         try:
             stats = transport.download_file(remote, local, resume=resume)
             report.items.append(_item_from_stats(remote, local, "file", stats))
+            if progress:
+                progress({"phase": "config_file", "stage": "config", "file": name, "status": "ok"})
         except error_perm as exc:
             report.items.append(BackupItemReport(
                 remote_path=remote,
@@ -117,8 +130,12 @@ def backup_wordpress_ftp(
                 status="missing-or-denied",
                 error=str(exc),
             ))
+            if progress:
+                progress({"phase": "config_file", "stage": "config", "file": name, "status": "missing", "error": str(exc)})
 
-    # Write a non-secret transfer report before hashing so it is covered by the manifest.
+    if progress:
+        progress({"phase": "verify", "stage": "manifest"})
+
     report_file = backup_root / "backup-report.json"
     report_file.write_text(json.dumps(asdict(report), indent=2, ensure_ascii=False), encoding="utf-8")
 
@@ -128,12 +145,13 @@ def backup_wordpress_ftp(
     report.verified = ok
     report.verification_problems = problems
 
-    # Rewrite report with final verification state. Manifest intentionally excludes
-    # only manifest.json, so regenerate once to cover the finalized report.
     report_file.write_text(json.dumps(asdict(report), indent=2, ensure_ascii=False), encoding="utf-8")
     manifest = write_manifest(backup_root)
     ok, problems = verify_manifest(backup_root, manifest)
     report.manifest_path = str(manifest)
     report.verified = ok
     report.verification_problems = problems
+
+    if progress:
+        progress({"phase": "verified", "stage": "manifest", "verified": ok})
     return report

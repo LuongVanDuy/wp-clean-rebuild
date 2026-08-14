@@ -47,7 +47,7 @@ def rebuild_config(
         console.print("  1. Verify original backup + clean staging again")
         console.print("  2. Download/extract fresh WordPress core before the destructive boundary")
         console.print("  3. Wipe everything inside the configured WordPress root except .well-known")
-        console.print("  4. Upload fresh WordPress core + fresh wp-config.php with new salts")
+        console.print("  4. Upload fresh WordPress core + fresh wp-config.php + clean WordPress .htaccess")
         console.print("  5. Restore clean/uploads")
         if restore_backup_code:
             console.print("  6. [red]Restore backed-up plugins/themes/mu-plugins by explicit override[/red]")
@@ -135,6 +135,7 @@ def rebuild_config(
     console.print(f"Fresh core uploaded: {report.core_uploaded} files")
     console.print(f"Clean uploads restored: {report.uploads_uploaded} files")
     console.print(f"Fresh wp-config.php uploaded: {report.wp_config_uploaded}")
+    console.print(f"Clean .htaccess uploaded: {report.htaccess_uploaded}")
     console.print(f"Database imported: {report.database_imported} ({report.database_statements} statements)")
     console.print(
         f"Temporary import cleanup: bridge_removed={report.temp_bridge_removed}, data_removed={report.temp_sql_removed}"

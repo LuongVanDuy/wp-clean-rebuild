@@ -6,6 +6,9 @@ from typing import Any
 from rich.prompt import Prompt
 
 from . import operator_wizard as wizard
+from . import plugin_workflow as plugin_module
+from . import rebuild_entry as theme_module
+from .operator_locale import VietnameseConsoleProxy
 
 
 def _next_stage(status: dict[str, Any]) -> str:
@@ -60,6 +63,13 @@ def _stage_manual_plugins(profile, paths, status: dict[str, Any]) -> None:
         manual_plugins_note="uploaded" if choice == "1" else "accepted-for-later",
     )
 
+
+# Apply Vietnamese operator-facing output to the two engine modules that still
+# contain a few English status labels. Technical terms such as SHA-256/FTP and
+# raw exception details are intentionally preserved.
+_operator_console = VietnameseConsoleProxy(wizard.console)
+theme_module.console = _operator_console
+plugin_module.console = _operator_console
 
 # Patch the original wizard module in one place so its run loop uses the hardened
 # routing and the cleaner Vietnamese manual-plugin prompt.

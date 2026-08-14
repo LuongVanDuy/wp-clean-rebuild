@@ -47,13 +47,27 @@ def test_fresh_wp_config_preserves_db_prefix_and_rotates_salts(tmp_path: Path):
         assert len(match.group(1)) >= 64
 
 
-def test_clean_htaccess_uses_standard_root_wordpress_rewrites():
+def test_clean_htaccess_uses_full_production_litespeed_apache_defaults():
     generated = build_clean_htaccess("https://example.com")
 
+    assert "RewriteRule ^ https://%{HTTP_HOST}%{REQUEST_URI} [L,R=301]" in generated
+    assert 'Header always set X-Content-Type-Options "nosniff"' in generated
+    assert "Options -Indexes" in generated
+    assert 'FilesMatch "^(wp-config\\.php|\\.env|composer\\.(json|lock))$"' in generated
+    assert "<Files xmlrpc.php>" in generated
+    assert "ExpiresActive On" in generated
+    assert "AddType image/avif .avif" in generated
+    assert 'Header set Access-Control-Allow-Origin "*"' in generated
+    assert 'Header set Content-Security-Policy "sandbox"' in generated
+    assert "RewriteCond %1.avif -f" in generated
+    assert "RewriteCond %1.webp -f" in generated
+    assert "<IfModule LiteSpeed>" in generated
+    assert "CacheLookup on" in generated
     assert "# BEGIN WordPress" in generated
     assert "RewriteBase /" in generated
     assert "RewriteRule . /index.php [L]" in generated
     assert "HTTP_AUTHORIZATION" in generated
+    assert generated.index("# BEGIN WordPress") > generated.index("<IfModule LiteSpeed>")
     assert "evil" not in generated
 
 
@@ -62,6 +76,13 @@ def test_clean_htaccess_supports_subdirectory_site_url():
 
     assert "RewriteBase /blog/" in generated
     assert "RewriteRule . /blog/index.php [L]" in generated
+
+
+def test_clean_htaccess_does_not_force_https_for_http_site_url():
+    generated = build_clean_htaccess("http://example.test")
+
+    assert "HTTPS redirect disabled because siteUrl is not https." in generated
+    assert "RewriteRule ^ https://%{HTTP_HOST}%{REQUEST_URI} [L,R=301]" not in generated
 
 
 def test_extract_wordpress_requires_expected_layout_and_reads_version(tmp_path: Path):
@@ -110,5 +131,6 @@ def test_rebuild_command_requires_explicit_execute_flag(tmp_path: Path):
     assert result.exit_code == 0
     assert "DRY ARM ONLY" in result.stdout
     assert "--execute" in result.stdout
-    assert ".htaccess" in result.stdout
+    assert "LiteSpeed/Apache .htaccess" in result.stdout
+    assert "detailed diagnostics" in result.stdout
     assert "nothing was changed remotely" in result.stdout.lower()

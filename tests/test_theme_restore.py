@@ -11,10 +11,11 @@ from wpclean.theme_restore import (
 
 
 def _write_clean_sql(path: Path, template: str, stylesheet: str) -> None:
+    # db_bridge exports every non-NULL MySQL value quoted, including numeric option_id.
     path.write_text(
         "INSERT INTO `wp_options` VALUES "
-        f"(1,'template','{template}','yes'),"
-        f"(2,'stylesheet','{stylesheet}','yes');\n",
+        f"('1','template','{template}','yes'),\n"
+        f"('2','stylesheet','{stylesheet}','yes');\n",
         encoding="utf-8",
     )
 
@@ -42,6 +43,22 @@ def test_detect_active_flatsome_child(tmp_path: Path):
     assert active.is_flatsome is True
     assert active.has_child is True
     assert active.stylesheet == "flatsome-child"
+
+
+def test_detect_active_theme_still_accepts_unquoted_numeric_id(tmp_path: Path):
+    sql = tmp_path / "clean.sql"
+    sql.write_text(
+        "INSERT INTO `wp_options` VALUES "
+        "(1,'template','flatsome','yes'),"
+        "(2,'stylesheet','flatsome','yes');\n",
+        encoding="utf-8",
+    )
+
+    active = detect_active_theme(sql)
+
+    assert active is not None
+    assert active.template == "flatsome"
+    assert active.stylesheet == "flatsome"
 
 
 def test_clean_flatsome_child_passes_static_gate(tmp_path: Path):

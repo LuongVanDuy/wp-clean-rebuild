@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+from io import StringIO
 import json
 import re
 from pathlib import Path
 
 from typer.testing import CliRunner
 
-from wpclean import gui_entry  # noqa: F401 - activates GUI runtime patches
+from wpclean import gui_entry  # activates GUI runtime patches
 from wpclean import gui_server
 from wpclean.gui_ui import render_app
 from wpclean.rebuild_entry import app
@@ -47,6 +48,10 @@ def test_gui_html_is_self_contained_vietnamese_and_readable() -> None:
     assert "page-head h1{font-size:32px}" in html
     assert "project-name h3{font-size:17px}" in html
     assert "field input,.field select{font-size:16px}" in html
+    assert "drawer{width:min(1380px,98vw)}" in html
+    assert "detail-layout{display:grid" in html
+    assert "LOG XỬ LÝ" in html
+    assert "terminalOutput" in html
     assert 'type="password"' not in html
     assert "test-token" in html
     assert "https://cdn" not in html
@@ -57,6 +62,28 @@ def test_gui_html_is_self_contained_vietnamese_and_readable() -> None:
     weights = [int(item) for item in re.findall(r"font-weight:(\d+)", html)]
     assert weights
     assert max(weights) <= 700
+
+
+def test_gui_terminal_stream_captures_stdout_and_keeps_history() -> None:
+    job = gui_server.GuiJob(project="terminal-test")
+    mirror = StringIO()
+    stream = gui_entry._GuiTerminalStream(job, mirror)
+
+    stream.write("Files discovered: 120\n")
+    stream.write("\x1b[31mwarning line\x1b[0m\n")
+    stream.flush()
+
+    assert "Files discovered: 120" in mirror.getvalue()
+    assert any("Files discovered: 120" in line for line in job.logs)
+    assert any("warning line" in line for line in job.logs)
+    assert all("\x1b" not in line for line in job.logs)
+
+    for index in range(350):
+        job.log(f"line-{index}")
+    assert len(job.logs) >= 350
+    payload = job.to_dict()
+    assert len(payload["logs"]) == 300
+    assert "line-349" in payload["logs"][-1]
 
 
 def test_gui_create_project_writes_local_profile(tmp_path: Path, monkeypatch) -> None:

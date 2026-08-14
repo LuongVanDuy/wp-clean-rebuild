@@ -20,8 +20,7 @@ from wpclean.rebuild_execute import (
 def test_fresh_wp_config_preserves_db_prefix_and_rotates_salts(tmp_path: Path):
     source = tmp_path / "wp-config.php"
     source.write_text(
-        """<?php
-"
+        "<?php\n"
         "define('DB_NAME', 'example_db');\n"
         "define('DB_USER', 'example_user');\n"
         "define('DB_PASSWORD', 'db-secret');\n"
@@ -29,8 +28,7 @@ def test_fresh_wp_config_preserves_db_prefix_and_rotates_salts(tmp_path: Path):
         "define('DB_CHARSET', 'utf8mb4');\n"
         "define('DB_COLLATE', '');\n"
         "define('AUTH_KEY', 'old-compromised-salt');\n"
-        "$table_prefix = 'old_';\n"
-        """,
+        "$table_prefix = 'old_';\n",
         encoding="utf-8",
     )
 

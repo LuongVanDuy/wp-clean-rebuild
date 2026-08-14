@@ -10,6 +10,7 @@ from .cli import console, _profile_transport
 from .entry import app
 from . import rebuild_execute as rebuild_engine
 from .htaccess_defaults import build_production_htaccess
+from .plugin_workflow import run_plugin_stage
 from .rebuild_execute import execute_rebuild
 from .rebuild_resume import import_database_with_diagnostics, resume_database_import
 from .site_config import load_site_profile
@@ -290,6 +291,7 @@ def rebuild_config(
         console.print("  7. Import clean/database/clean.sql through a temporary authenticated bridge with detailed diagnostics")
         console.print("  8. Remove temporary import bridge/data and write execution report")
         console.print("  9. Detect active theme; install trusted Flatsome; child themes use immutable backup + repair workspace gate")
+        console.print(" 10. Inventory backup plugins; reinstall only WordPress.org plugins from fresh official packages; list private plugins for manual clean upload")
         console.print("\nTo execute, rerun with [bold]--execute[/bold].")
         return
 
@@ -379,6 +381,22 @@ def rebuild_config(
         )
         raise typer.Exit(code=2) from exc
 
+    try:
+        plugin_result = run_plugin_stage(
+            profile=profile,
+            transport=transport,
+            backup_root=backup_root,
+            report_path=report_path,
+        )
+    except Exception as exc:
+        console.print(f"\n[bold red]PLUGIN STAGE STOPPED:[/bold red] {exc}")
+        console.print("[green]WordPress core/database và theme stage đã chạy xong; không wipe lại website.[/green]")
+        console.print("[yellow]Do NOT rerun destructive --execute chỉ để thử lại plugin.[/yellow]")
+        console.print(
+            f"Retry plugin only with: .\\wpclean.bat rebuild-plugin-config {config} {backup_root}"
+        )
+        raise typer.Exit(code=2) from exc
+
     console.print("\n[bold green]REBUILD COMPLETED[/bold green]")
     console.print(f"WordPress version: {report.wordpress_version}")
     console.print(f"WordPress package SHA-256: {report.wordpress_package_sha256}")
@@ -407,16 +425,27 @@ def rebuild_config(
         console.print(
             f"[yellow]Unsupported theme requires manual install: {theme_result.unsupported_theme}[/yellow]"
         )
+    console.print(
+        f"WordPress.org plugins installed: {plugin_result.installed_count}/{plugin_result.wordpress_org_count}"
+    )
+    if plugin_result.manual_count:
+        console.print(
+            f"[yellow]Private/non-WordPress.org plugins requiring manual clean upload: {plugin_result.manual_count}[/yellow]"
+        )
+    if plugin_result.lookup_error_count:
+        console.print(
+            f"[yellow]Plugin lookups requiring retry: {plugin_result.lookup_error_count}[/yellow]"
+        )
     if restore_backup_code:
         console.print(
             f"Backed-up executable code restored by override: plugins={report.plugins_uploaded}, themes={report.themes_uploaded}, mu-plugins={report.mu_plugins_uploaded}"
         )
-    else:
-        console.print("[yellow]Old plugins were intentionally not restored; plugin automation will be handled separately.[/yellow]")
     for warning in report.warnings:
         console.print(f"[yellow]Warning: {warning}[/yellow]")
     for warning in theme_result.warnings:
         console.print(f"[yellow]Theme warning: {warning}[/yellow]")
+    for warning in plugin_result.warnings:
+        console.print(f"[yellow]Plugin warning: {warning}[/yellow]")
     console.print(f"Execution report: {report_path}")
 
 
@@ -462,6 +491,46 @@ def rebuild_theme_config(
         console.print(f"Repair workspace: {result.child_repair_workspace}")
     if result.unsupported_theme:
         console.print(f"Manual theme required: {result.unsupported_theme}")
+    console.print(f"Execution report updated: {report_path}")
+
+
+@app.command("rebuild-plugin-config")
+def rebuild_plugin_config(
+    config: Path = typer.Argument(..., exists=True, dir_okay=False),
+    backup_root: Path | None = typer.Argument(
+        None,
+        help="Verified backup root. Defaults to ./backups/<host>.",
+    ),
+) -> None:
+    """Run only plugin inventory/classification and trusted WordPress.org reinstall."""
+    profile = load_site_profile(config)
+    backup_root = backup_root or Path("backups") / profile.host
+    report_path = Path("reports") / profile.host / "rebuild-execute.json"
+    transport, _remote_root = _profile_transport(config)
+
+    console.print(f"Site: {profile.host}")
+    console.print(f"Remote WordPress root: {profile.remote_path}")
+    console.print("[bold cyan]PLUGIN-ONLY MODE — no wipe, no WordPress reinstall, no database import, no theme changes.[/bold cyan]")
+    if not profile.use_tls:
+        console.print("[yellow]Warning: profile protocol=ftp uses unencrypted transport.[/yellow]")
+
+    try:
+        result = run_plugin_stage(
+            profile=profile,
+            transport=transport,
+            backup_root=backup_root,
+            report_path=report_path,
+        )
+    except Exception as exc:
+        console.print(f"[bold red]PLUGIN STAGE STOPPED:[/bold red] {exc}")
+        raise typer.Exit(code=2) from exc
+
+    console.print("\n[bold green]PLUGIN-ONLY STAGE COMPLETED[/bold green]")
+    console.print(f"Plugins inventoried: {result.inventory_count}")
+    console.print(f"WordPress.org plugins: {result.wordpress_org_count}")
+    console.print(f"Installed from WordPress.org: {result.installed_count}")
+    console.print(f"Manual/private plugins: {result.manual_count}")
+    console.print(f"Lookup errors: {result.lookup_error_count}")
     console.print(f"Execution report updated: {report_path}")
 
 

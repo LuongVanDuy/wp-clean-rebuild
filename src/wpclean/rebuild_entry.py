@@ -7,8 +7,16 @@ import typer
 
 from .cli import console, _profile_transport
 from .entry import app
+from . import rebuild_execute as rebuild_engine
 from .rebuild_execute import execute_rebuild
+from .rebuild_resume import import_database_with_diagnostics, resume_database_import
 from .site_config import load_site_profile
+
+
+# Use the diagnostic importer for normal rebuilds too. execute_rebuild resolves
+# _import_database from its module globals at runtime, so this keeps the existing
+# engine flow while preserving HTTP/PHP/MySQL error details.
+rebuild_engine._import_database = import_database_with_diagnostics
 
 
 @app.command("rebuild-config")
@@ -149,6 +157,70 @@ def rebuild_config(
     for warning in report.warnings:
         console.print(f"[yellow]Warning: {warning}[/yellow]")
     console.print(f"Execution report: {report_path}")
+
+
+@app.command("rebuild-resume-db-config")
+def rebuild_resume_db_config(
+    config: Path = typer.Argument(..., exists=True, dir_okay=False),
+    backup_root: Path | None = typer.Argument(
+        None,
+        help="Verified backup root. Defaults to ./backups/<host>.",
+    ),
+) -> None:
+    """Resume only a failed clean database import; never wipe or reinstall WordPress."""
+    profile = load_site_profile(config)
+    backup_root = backup_root or Path("backups") / profile.host
+    report_path = Path("reports") / profile.host / "rebuild-execute.json"
+    transport, _remote_root = _profile_transport(config)
+
+    console.print(f"Site: {profile.host}")
+    console.print(f"Remote WordPress root: {profile.remote_path}")
+    console.print(f"Clean database: {backup_root / 'clean' / 'database' / 'clean.sql'}")
+    console.print(f"Execution report: {report_path}")
+    console.print("[bold cyan]DATABASE-ONLY RESUME — remote WordPress files will NOT be wiped or reinstalled.[/bold cyan]")
+    if not profile.use_tls:
+        console.print("[yellow]Warning: profile protocol=ftp uses unencrypted transport.[/yellow]")
+
+    update_lock = threading.Lock()
+    with console.status("[cyan]Preparing database-only resume...[/cyan]", spinner="dots") as status:
+        def on_progress(event: dict) -> None:
+            phase = event.get("phase")
+            with update_lock:
+                if phase == "db_resume_ready":
+                    status.update(
+                        f"[cyan]Recovery state verified; stale temp files removed={event.get('stale_removed', 0)}.[/cyan]"
+                    )
+                elif phase == "db_import_upload":
+                    status.update("[cyan]Uploading clean.sql to temporary authenticated import staging...[/cyan]")
+                elif phase == "db_import_execute":
+                    status.update("[cyan]Importing sanitized database...[/cyan]")
+                elif phase == "db_import_cleanup":
+                    status.update(
+                        "[cyan]Cleaning temporary database bridge/data: "
+                        f"bridge={event.get('bridge_removed')} data={event.get('data_removed')}[/cyan]"
+                    )
+
+        try:
+            result = resume_database_import(
+                profile=profile,
+                transport=transport,
+                backup_root=backup_root,
+                execution_report_path=report_path,
+                progress=on_progress,
+            )
+        except Exception as exc:
+            console.print(f"\n[bold red]DATABASE RESUME STOPPED:[/bold red] {exc}")
+            console.print(f"Execution report updated: {report_path}")
+            console.print("[yellow]No remote wipe/reinstall was performed by this resume command.[/yellow]")
+            raise typer.Exit(code=2) from exc
+
+    console.print("\n[bold green]DATABASE IMPORT RESUME COMPLETED[/bold green]")
+    console.print(f"SQL statements imported: {result.statements}")
+    console.print(f"Stale import files removed before retry: {len(result.stale_files_removed)}")
+    console.print(
+        f"Temporary import cleanup: bridge_removed={result.bridge_removed}, data_removed={result.data_removed}"
+    )
+    console.print(f"Execution report updated: {report_path}")
 
 
 __all__ = ["app"]

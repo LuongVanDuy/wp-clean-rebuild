@@ -58,13 +58,27 @@ class ChildThemeScan:
         return bool(self.unreadable_files) or any(item.score >= 60 for item in self.findings)
 
     def to_dict(self) -> dict[str, object]:
+        findings: list[dict[str, object]] = []
+        for item in self.findings:
+            findings.append(
+                {
+                    "source": item.source,
+                    "location": item.location,
+                    "score": item.score,
+                    "severity": item.severity.value,
+                    "signals": [asdict(signal) for signal in item.signals],
+                    "preview": item.preview,
+                    "metadata": item.metadata,
+                    "action": item.recommended_action,
+                }
+            )
         return {
             "slug": self.slug,
             "path": self.path,
             "files_scanned": self.files_scanned,
             "unreadable_files": self.unreadable_files,
             "blocked": self.blocked,
-            "findings": [asdict(item) for item in self.findings],
+            "findings": findings,
         }
 
 
@@ -238,10 +252,8 @@ def scan_child_theme(theme_root: Path, *, slug: str | None = None) -> ChildTheme
             continue
         report.files_scanned += 1
         try:
-            if path.stat().st_size > 8 * 1024 * 1024:
-                # Large assets are hashed/read only when they are text/code files.
-                if path.suffix.lower() not in TEXT_SUFFIXES:
-                    continue
+            if path.stat().st_size > 8 * 1024 * 1024 and path.suffix.lower() not in TEXT_SUFFIXES:
+                continue
             data = path.read_bytes()
         except OSError:
             report.unreadable_files.append(str(path))
@@ -256,15 +268,24 @@ def _safe_extract_flatsome(package: Path, destination: Path) -> tuple[Path, str]
     if not package.is_file() or package.stat().st_size == 0:
         raise ValueError(f"Trusted Flatsome package is missing or empty: {package}")
 
-    digest = hashlib.sha256(package.read_bytes()).hexdigest()
+    digest = hashlib.sha256()
+    with package.open("rb") as fh:
+        while chunk := fh.read(1024 * 1024):
+            digest.update(chunk)
+
     try:
         with zipfile.ZipFile(package) as archive:
             members = [item for item in archive.infolist() if not item.is_dir()]
             if not members:
                 raise ValueError("Flatsome ZIP is empty.")
 
-            roots = {PurePosixPath(item.filename.replace("\\", "/")).parts[0] for item in members if PurePosixPath(item.filename.replace("\\", "/")).parts}
-            candidate_root = "flatsome" if "flatsome" in {item.lower() for item in roots} else (next(iter(roots)) if len(roots) == 1 else "")
+            roots = {
+                PurePosixPath(item.filename.replace("\\", "/")).parts[0]
+                for item in members
+                if PurePosixPath(item.filename.replace("\\", "/")).parts
+            }
+            by_lower = {item.lower(): item for item in roots}
+            candidate_root = by_lower.get("flatsome") or (next(iter(roots)) if len(roots) == 1 else "")
             if not candidate_root:
                 raise ValueError("Flatsome ZIP must contain one installable theme root.")
 
@@ -294,7 +315,7 @@ def _safe_extract_flatsome(package: Path, destination: Path) -> tuple[Path, str]
     headers = _read_theme_header(style_css)
     if not style_css.is_file() or "flatsome" not in headers.get("theme_name", "").lower():
         raise ValueError("Flatsome ZIP validation failed: style.css does not identify Flatsome.")
-    return destination, digest
+    return destination, digest.hexdigest()
 
 
 def install_flatsome(

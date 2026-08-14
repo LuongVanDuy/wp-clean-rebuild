@@ -7,6 +7,15 @@ from pathlib import Path
 
 import typer
 from rich.console import Console
+from rich.progress import (
+    BarColumn,
+    Progress,
+    SpinnerColumn,
+    TaskProgressColumn,
+    TextColumn,
+    TimeElapsedColumn,
+    TransferSpeedColumn,
+)
 
 from .backup import verify_manifest, write_manifest
 from .remote_backup import backup_wordpress_ftp
@@ -46,6 +55,159 @@ def _profile_transport(config_path: Path) -> tuple[FTPTransport, str]:
     return FTPTransport(cfg), profile.remote_path
 
 
+def _run_backup_with_progress(transport: FTPTransport, remote_root: str, out: Path, resume: bool):
+    current_stage = {"name": "starting"}
+    last_discovery_line = {"value": ""}
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[bold cyan]{task.description}"),
+        BarColumn(),
+        TaskProgressColumn(),
+        TextColumn("{task.fields[files]}"),
+        TextColumn("{task.fields[bytes]}"),
+        TransferSpeedColumn(),
+        TimeElapsedColumn(),
+        console=console,
+        refresh_per_second=8,
+    ) as progress_ui:
+        task_id = progress_ui.add_task(
+            "Preparing backup",
+            total=1,
+            files="",
+            bytes="",
+        )
+
+        def on_progress(event: dict) -> None:
+            phase = event.get("phase")
+            stage = event.get("stage", current_stage["name"])
+
+            if phase == "stage":
+                current_stage["name"] = stage
+                progress_ui.update(
+                    task_id,
+                    description=f"[{stage}] discovering files",
+                    total=1,
+                    completed=0,
+                    files="",
+                    bytes="",
+                )
+                return
+
+            if phase == "discover":
+                dirs = event.get("dirs_scanned", 0)
+                found = event.get("files_found", 0)
+                current_dir = event.get("current_dir", "")
+                short_dir = current_dir[-55:] if len(current_dir) > 55 else current_dir
+                line = f"[{stage}] scanning dirs={dirs} files={found}  {short_dir}"
+                if line != last_discovery_line["value"]:
+                    last_discovery_line["value"] = line
+                progress_ui.update(
+                    task_id,
+                    description=f"[{stage}] scanning directories",
+                    files=f"dirs {dirs} | files {found}",
+                    bytes="",
+                )
+                return
+
+            if phase == "discovered":
+                total_files = event.get("files_found", 0)
+                total_bytes = event.get("bytes_total", 0)
+                progress_ui.update(
+                    task_id,
+                    description=f"[{stage}] downloading",
+                    total=max(total_files, 1),
+                    completed=0,
+                    files=f"0/{total_files} files",
+                    bytes=f"0 B / {_human_bytes(total_bytes)}" if total_bytes else "",
+                )
+                return
+
+            if phase == "transfer":
+                total_files = event.get("files_total", 0)
+                completed = event.get("files_completed", 0)
+                transferred = event.get("bytes_downloaded", 0)
+                total_bytes = event.get("bytes_total", 0)
+                progress_ui.update(
+                    task_id,
+                    description=f"[{stage}] downloading",
+                    total=max(total_files, 1),
+                    completed=completed,
+                    files=f"{completed}/{total_files} files",
+                    bytes=(
+                        f"{_human_bytes(transferred)} / {_human_bytes(total_bytes)}"
+                        if total_bytes else _human_bytes(transferred)
+                    ),
+                )
+                return
+
+            if phase == "complete":
+                total_files = event.get("files_total", 0)
+                transferred = event.get("bytes_downloaded", 0)
+                progress_ui.update(
+                    task_id,
+                    description=f"[{stage}] complete",
+                    total=max(total_files, 1),
+                    completed=max(total_files, 1),
+                    files=f"{total_files}/{total_files} files",
+                    bytes=_human_bytes(transferred),
+                )
+                return
+
+            if phase == "stage_skipped":
+                progress_ui.update(
+                    task_id,
+                    description=f"[{stage}] skipped",
+                    total=1,
+                    completed=1,
+                    files="",
+                    bytes="",
+                )
+                return
+
+            if phase == "config_file":
+                name = event.get("file", "config")
+                status = event.get("status", "")
+                progress_ui.update(
+                    task_id,
+                    description=f"[config] {name}: {status}",
+                    total=1,
+                    completed=1,
+                    files="",
+                    bytes="",
+                )
+                return
+
+            if phase == "verify":
+                progress_ui.update(
+                    task_id,
+                    description="[manifest] calculating and verifying SHA-256",
+                    total=None,
+                    files="",
+                    bytes="",
+                )
+                return
+
+            if phase == "verified":
+                ok = event.get("verified", False)
+                progress_ui.update(
+                    task_id,
+                    description="[manifest] verification passed" if ok else "[manifest] verification failed",
+                    total=1,
+                    completed=1,
+                    files="",
+                    bytes="",
+                )
+
+        return backup_wordpress_ftp(
+            transport,
+            remote_root,
+            out,
+            resume=resume,
+            progress=on_progress,
+        )
+
+
 @app.command()
 def doctor() -> None:
     """Check local runtime."""
@@ -56,7 +218,6 @@ def doctor() -> None:
 
 @app.command("scan-sql")
 def scan_sql(path: Path = typer.Argument(..., exists=True, dir_okay=False)) -> None:
-    """Scan an SQL dump offline. Never modifies the dump."""
     findings = run_sql_scan(path)
     show_findings(findings)
     raise typer.Exit(code=1 if findings else 0)
@@ -64,7 +225,6 @@ def scan_sql(path: Path = typer.Argument(..., exists=True, dir_okay=False)) -> N
 
 @app.command("scan-uploads")
 def scan_uploads(path: Path = typer.Argument(..., exists=True, file_okay=False)) -> None:
-    """Scan a local uploads directory. Never deletes files."""
     findings = run_upload_scan(path)
     show_findings(findings)
     raise typer.Exit(code=1 if findings else 0)
@@ -72,14 +232,12 @@ def scan_uploads(path: Path = typer.Argument(..., exists=True, file_okay=False))
 
 @app.command("manifest")
 def manifest(path: Path = typer.Argument(..., exists=True, file_okay=False)) -> None:
-    """Create manifest.json with SHA-256 hashes for a completed backup directory."""
     out = write_manifest(path)
     console.print(f"[green]Manifest written:[/green] {out}")
 
 
 @app.command("verify-backup")
 def verify_backup(path: Path = typer.Argument(..., exists=True, file_okay=False)) -> None:
-    """Verify backup files against manifest.json."""
     ok, problems = verify_manifest(path)
     if ok:
         console.print("[green]Backup verification passed.[/green]")
@@ -98,17 +256,8 @@ def ftp_test(
     tls: bool = typer.Option(True, "--tls/--plain-ftp"),
     passive: bool = typer.Option(True, "--passive/--active"),
 ) -> None:
-    """Test FTP/FTPS credentials without writing to the server."""
     password = os.getenv("WPCLEAN_FTP_PASSWORD") or typer.prompt("FTP password", hide_input=True)
-    cfg = FTPConfig(
-        host=host,
-        username=username,
-        password=password,
-        port=port,
-        tls=tls,
-        passive=passive,
-        workers=1,
-    )
+    cfg = FTPConfig(host=host, username=username, password=password, port=port, tls=tls, passive=passive, workers=1)
     pwd = FTPTransport(cfg).test_connection()
     mode = "FTPS" if tls else "FTP"
     console.print(f"[green]{mode} connection OK.[/green] Remote cwd: {pwd}")
@@ -117,10 +266,7 @@ def ftp_test(
 
 
 @app.command("ftp-test-config")
-def ftp_test_config(
-    config: Path = typer.Argument(..., exists=True, dir_okay=False),
-) -> None:
-    """Test a JSON site profile using host/username/password/protocol/port/remotePath."""
+def ftp_test_config(config: Path = typer.Argument(..., exists=True, dir_okay=False)) -> None:
     profile = load_site_profile(config)
     transport, remote_root = _profile_transport(config)
     pwd = transport.test_connection()
@@ -137,8 +283,8 @@ def ftp_test_config(
 def backup_ftp(
     host: str = typer.Option(..., "--host"),
     username: str = typer.Option(..., "--user"),
-    remote_root: str = typer.Option(..., "--remote-root", help="WordPress root, e.g. /public_html"),
-    out: Path = typer.Option(..., "--out", help="Local backup directory"),
+    remote_root: str = typer.Option(..., "--remote-root"),
+    out: Path = typer.Option(..., "--out"),
     port: int = typer.Option(21, "--port"),
     tls: bool = typer.Option(True, "--tls/--plain-ftp"),
     passive: bool = typer.Option(True, "--passive/--active"),
@@ -146,7 +292,6 @@ def backup_ftp(
     block_mb: int = typer.Option(1, "--block-mb", min=1, max=8),
     resume: bool = typer.Option(True, "--resume/--no-resume"),
 ) -> None:
-    """Back up WordPress files over high-throughput FTP/FTPS and verify SHA-256 manifest."""
     password = os.getenv("WPCLEAN_FTP_PASSWORD") or typer.prompt("FTP password", hide_input=True)
     if not tls:
         console.print("[yellow]Warning: plain FTP is unencrypted. Prefer --tls whenever the host supports FTPS.[/yellow]")
@@ -165,18 +310,16 @@ def backup_ftp(
     pwd = transport.test_connection()
     console.print(f"Connected. Remote cwd: {pwd}")
     console.print(f"Transfer profile: workers={workers}, block={block_mb} MiB, resume={resume}, passive={passive}")
-
-    report = backup_wordpress_ftp(transport, remote_root, out, resume=resume)
+    report = _run_backup_with_progress(transport, remote_root, out, resume)
     _print_backup_report(report)
 
 
 @app.command("backup-config")
 def backup_config(
     config: Path = typer.Argument(..., exists=True, dir_okay=False),
-    out: Path | None = typer.Option(None, "--out", help="Local backup directory. Defaults to ./backups/<host>"),
+    out: Path | None = typer.Option(None, "--out"),
     resume: bool = typer.Option(True, "--resume/--no-resume"),
 ) -> None:
-    """Back up WordPress using a JSON site connection profile."""
     profile = load_site_profile(config)
     transport, remote_root = _profile_transport(config)
     out = out or Path("backups") / profile.host
@@ -193,7 +336,7 @@ def backup_config(
     )
     console.print(f"Local backup: {out}")
 
-    report = backup_wordpress_ftp(transport, remote_root, out, resume=resume)
+    report = _run_backup_with_progress(transport, remote_root, out, resume)
     _print_backup_report(report)
 
 

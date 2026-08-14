@@ -45,6 +45,30 @@ function Tim-Uv {
     return $null
 }
 
+function KiemTra-LenhNative {
+    param(
+        [Parameter(Mandatory = $true)][string]$FilePath,
+        [Parameter(Mandatory = $true)][string[]]$Arguments
+    )
+
+    # Windows PowerShell 5 biến stderr của chương trình native thành ErrorRecord.
+    # Với ErrorActionPreference=Stop, một probe hợp lệ có exit code != 0 có thể
+    # terminate script trước khi wizard kịp hỏi người dùng có muốn cài hay không.
+    $oldErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'SilentlyContinue'
+        & $FilePath @Arguments 1>$null 2>$null
+        $exitCode = $LASTEXITCODE
+    }
+    catch {
+        $exitCode = 1
+    }
+    finally {
+        $ErrorActionPreference = $oldErrorActionPreference
+    }
+    return ($exitCode -eq 0)
+}
+
 TieuDe 'WP CLEAN REBUILD - TRINH HUONG DAN TU DONG'
 Write-Host 'Nhan su chi can lam theo cac cau hoi tren man hinh.'
 Write-Host 'He thong se tu kiem tra moi truong, du an va tiep tuc dung buoc dang do.'
@@ -77,24 +101,31 @@ if (-not $uvExe) {
 }
 ThanhCong "Đã có uv: $(& $uvExe --version)"
 
-& $uvExe python find 3.13 *> $null
-if ($LASTEXITCODE -ne 0) {
-    CanhBao 'Chưa có Python 3.13 do uv quản lý.'
-    if (-not (Hoi-CoKhong 'Bạn có muốn cài Python 3.13 tự động không?')) {
+$pythonReady = KiemTra-LenhNative -FilePath $uvExe -Arguments @('python', 'find', '3.13')
+if (-not $pythonReady) {
+    CanhBao 'Máy này chưa có Python 3.13 phù hợp cho WP Clean Rebuild.'
+    if (-not (Hoi-CoKhong 'Bạn có muốn tải và cài Python 3.13 tự động bằng uv không?')) {
         Loi 'Không thể tiếp tục khi chưa có Python 3.13.'
         exit 2
     }
-    Buoc 'Đang cài Python 3.13'
+
+    Buoc 'Đang tải và cài Python 3.13 - vui lòng chờ'
     & $uvExe python install 3.13
     if ($LASTEXITCODE -ne 0) {
-        Loi 'Cài Python 3.13 thất bại.'
+        Loi 'Cài Python 3.13 thất bại. Hãy kiểm tra kết nối Internet hoặc báo kỹ thuật.'
+        exit 2
+    }
+
+    $pythonReady = KiemTra-LenhNative -FilePath $uvExe -Arguments @('python', 'find', '3.13')
+    if (-not $pythonReady) {
+        Loi 'uv báo đã cài nhưng vẫn không tìm thấy Python 3.13. Vui lòng báo kỹ thuật.'
         exit 2
     }
 }
 ThanhCong 'Python 3.13 đã sẵn sàng.'
 
-& $uvExe run --no-sync wpclean doctor *> $null
-if ($LASTEXITCODE -ne 0) {
+$doctorReady = KiemTra-LenhNative -FilePath $uvExe -Arguments @('run', '--no-sync', 'wpclean', 'doctor')
+if (-not $doctorReady) {
     CanhBao 'Môi trường dự án hoặc thư viện Python chưa đầy đủ.'
     if (-not (Hoi-CoKhong 'Bạn có muốn cài/đồng bộ thư viện dự án tự động không?')) {
         Loi 'Không thể tiếp tục khi thư viện dự án chưa đầy đủ.'
@@ -108,8 +139,8 @@ if ($LASTEXITCODE -ne 0) {
     }
 }
 
-& $uvExe run --no-sync wpclean doctor *> $null
-if ($LASTEXITCODE -ne 0) {
+$doctorReady = KiemTra-LenhNative -FilePath $uvExe -Arguments @('run', '--no-sync', 'wpclean', 'doctor')
+if (-not $doctorReady) {
     Loi 'Tự kiểm tra môi trường vẫn thất bại. Vui lòng liên hệ kỹ thuật.'
     exit 2
 }

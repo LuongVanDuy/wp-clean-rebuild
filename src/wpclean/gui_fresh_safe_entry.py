@@ -2,14 +2,16 @@ from __future__ import annotations
 
 from pathlib import PurePosixPath
 import secrets
+import traceback
 
+from . import fresh_install as fresh_module
 from . import gui_fresh_entry as base
 from . import gui_server as server
 from .fresh_install import FreshInstallRequest, _call_bridge, _database_create_bridge, _encoded_config
 from .rebuild_execute import _delete_remote_file, _ensure_remote_dir, _php_single_quote, _upload_text
 
 
-_BASE_FRESH_WORKER = base._fresh_worker
+_ORIGINAL_RUN_FRESH_INSTALL = base.run_fresh_install
 
 
 def _database_test_bridge(req: FreshInstallRequest, token: str) -> str:
@@ -72,22 +74,82 @@ def _preflight_database(req: FreshInstallRequest, transport, job) -> None:
     job.log("Preflight database PASS · kết nối được và database rỗng", req.secrets)
 
 
+def _visible_bridge_name(value: str) -> str:
+    """Avoid dot-prefixed installer files because many hosts block HTTP access to dotfiles."""
+    text = str(value)
+    name = PurePosixPath(text).name
+    if name.startswith(".wpclean-db-") or name.startswith(".wpclean-install-"):
+        parent = str(PurePosixPath(text).parent)
+        visible = name[1:]
+        return visible if parent in {"", "."} else str(PurePosixPath(parent) / visible)
+    return text
+
+
+def _run_fresh_install_compatible(*args, **kwargs):
+    original_upload = fresh_module._upload_text
+    original_delete = fresh_module._delete_remote_file
+    original_call = fresh_module._call_bridge
+
+    def upload_visible(transport, remote_path: str, content: str) -> None:
+        original_upload(transport, _visible_bridge_name(remote_path), content)
+
+    def delete_visible(transport, remote_path: str) -> bool:
+        return original_delete(transport, _visible_bridge_name(remote_path))
+
+    def call_visible(site_url: str, filename: str, token: str):
+        return original_call(site_url, _visible_bridge_name(filename), token)
+
+    fresh_module._upload_text = upload_visible
+    fresh_module._delete_remote_file = delete_visible
+    fresh_module._call_bridge = call_visible
+    try:
+        return _ORIGINAL_RUN_FRESH_INSTALL(*args, **kwargs)
+    finally:
+        fresh_module._upload_text = original_upload
+        fresh_module._delete_remote_file = original_delete
+        fresh_module._call_bridge = original_call
+
+
 def _safe_fresh_worker(job, req: FreshInstallRequest) -> None:
+    report_dir = server.REPORTS_DIR / req.site_host
     try:
         transport = server.wizard._transport(req.profile, req.ftp_password)
         job.message = "Đang preflight FTP / database trước khi thay đổi hosting"
         job.percent = 2
         transport.test_connection()
         _preflight_database(req, transport, job)
+
+        job.log("Bắt đầu cài WordPress mới", req.secrets)
+        report = _run_fresh_install_compatible(
+            req,
+            transport=transport,
+            report_dir=report_dir,
+            progress=lambda event: base._fresh_progress(job, req, event),
+        )
+        job.report = report.public_dict()
+        job.status = "success"
+        job.percent = 100
+        job.message = "WordPress mới đã được cài đặt thành công."
+        job.log("Hoàn tất Fresh Install", req.secrets)
     except Exception as exc:
+        destructive_started = any(
+            marker in "\n".join(job.logs).lower()
+            for marker in ("đang xóa dữ liệu cũ", "đang upload wordpress", "đang tạo wp-config")
+        )
         job.status = "error"
-        job.error = f"Preflight {type(exc).__name__}: {exc}"
-        job.message = "Dừng trước destructive boundary; hosting chưa bị wipe bởi Fresh Install."
+        prefix = "Fresh Install" if destructive_started else "Preflight"
+        job.error = f"{prefix} {type(exc).__name__}: {exc}"
+        job.message = (
+            "Cài đặt đã dừng sau khi bắt đầu thay đổi hosting; kiểm tra log trước khi chạy lại."
+            if destructive_started
+            else "Dừng trước destructive boundary; hosting chưa bị wipe bởi Fresh Install."
+        )
         job.log(job.error, req.secrets)
-        return
-    _BASE_FRESH_WORKER(job, req)
+        job.log(traceback.format_exc(limit=4), req.secrets)
 
 
+# Keep Fresh Install a genuinely separate feature. It persists its own report/history,
+# but it does not create a normal Clean/Rebuild project after installation.
 base._fresh_worker = _safe_fresh_worker
 
 

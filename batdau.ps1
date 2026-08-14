@@ -1,4 +1,4 @@
-$ErrorActionPreference = 'Stop'
+﻿$ErrorActionPreference = 'Stop'
 
 function TieuDe($text) {
     Write-Host "`n============================================================" -ForegroundColor DarkCyan

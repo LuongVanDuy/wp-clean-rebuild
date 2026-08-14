@@ -96,6 +96,14 @@ def test_safe_entry_translates_dot_prefixed_bridges_for_http_compatibility() -> 
     assert gui_fresh_safe_entry._visible_bridge_name("/public_html/index.php") == "/public_html/index.php"
 
 
+def test_database_preflight_requires_empty_target_database() -> None:
+    req = FreshInstallRequest.from_dict(_payload())
+    php = gui_fresh_safe_entry._database_test_bridge(req, "token-test")
+    assert "SHOW TABLES" in php
+    assert "Database is not empty" in php
+    assert "tables'=>0" in php
+
+
 def test_gui_exposes_separate_fresh_install_wizard() -> None:
     html = render_app("test-token")
 
@@ -117,5 +125,7 @@ def test_launcher_points_to_safe_fresh_gui_entry() -> None:
     assert "Preflight database PASS" in safety
     assert "trước destructive boundary" in safety
     assert "does not create a normal Clean/Rebuild project" in safety
+    assert "Thư mục đích không rỗng" in safety
+    assert "Đang chạy Fresh Install" in safety
     assert "Hoàn tất Fresh Install" in safety
     assert "base._save_profile_after_install" not in safety

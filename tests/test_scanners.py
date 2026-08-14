@@ -75,9 +75,39 @@ def test_zip_is_preserved_in_backup_but_dropped_from_clean_restore(tmp_path: Pat
     assert finding.score == 30
     assert finding.signals[0].name == "uploads.archive_restore_policy"
     assert finding.metadata["restore_policy"] == "drop"
+    assert finding.metadata["archive_php_entries"] == ["plugin/test.php"]
     assert finding.recommended_action == "DROP FROM CLEAN RESTORE (ORIGINAL BACKUP KEPT)"
     assert len(finding.metadata["sha256"]) == 64
     assert archive_path.exists()
+
+
+def test_zip_with_obfuscated_persistent_php_is_critical(tmp_path: Path):
+    uploads = tmp_path / "uploads"
+    uploads.mkdir()
+    archive_path = uploads / "malware.zip"
+    malicious = b"""<?php
+function abcdefghijklmnop($x){ return gzinflate(base64_decode($x)); }
+function qwertyuiopasdfgh(){ wp_schedule_event(time()+300, 'hourly', 'x'); }
+function zxcvbnmasdfghjkl(){ $u='bad'; if (username_exists($u)) { wp_set_password('x', username_exists($u)); } }
+function poiuytrewqlkjhgf($p,$d){ file_put_contents($p,$d); chmod($p,0644); opcache_invalidate($p,true); }
+function mnbvcxzlkjhgfds(){ return 1; }
+function asdfghjklqwertyu(){ return 2; }
+function qazwsxedcrfvtgby(){ return 3; }
+function plmoknijbuhvygct(){ return 4; }
+function lkjhgfdsaqwertyu(){ return 5; }
+function ytrewqasdfghjklz(){ return 6; }
+"""
+    with zipfile.ZipFile(archive_path, "w") as archive:
+        archive.writestr("payload/payload.php", malicious)
+
+    findings = scan_uploads(uploads)
+    assert len(findings) == 1
+    finding = findings[0]
+    assert finding.score == 100
+    assert any(signal.name == "uploads.archive_malicious_php" for signal in finding.signals)
+    assert finding.metadata["restore_policy"] == "drop"
+    assert finding.metadata["archive_suspicious_entries"][0]["entry"] == "payload/payload.php"
+    assert finding.recommended_action == "QUARANTINE / DROP FROM CLEAN RESTORE (ORIGINAL BACKUP KEPT)"
 
 
 def test_manifest_detects_tamper(tmp_path: Path):

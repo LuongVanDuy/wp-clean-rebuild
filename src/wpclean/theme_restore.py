@@ -5,6 +5,7 @@ import hashlib
 import json
 from pathlib import Path, PurePosixPath
 import re
+import shutil
 import stat
 from tempfile import TemporaryDirectory
 from typing import Callable
@@ -99,9 +100,12 @@ class ThemeStageResult:
     child_theme_detected: bool = False
     child_theme_slug: str = ""
     child_scan: dict[str, object] | None = None
+    child_scan_source: str = ""
     child_prompted: bool = False
     child_installed: bool = False
     child_files_uploaded: int = 0
+    child_repair_workspace: str = ""
+    child_repair_created: bool = False
     unsupported_theme: str = ""
     warnings: list[str] = field(default_factory=list)
 
@@ -299,6 +303,98 @@ def scan_child_theme(
     return report
 
 
+def child_theme_repair_workspace(backup_root: Path, slug: str) -> Path:
+    """Return the editable child-theme working copy path outside immutable backup."""
+    return Path("repairs") / backup_root.name / "themes" / slug / "working-copy"
+
+
+def existing_child_theme_repair(backup_root: Path, slug: str) -> Path | None:
+    working_copy = child_theme_repair_workspace(backup_root, slug)
+    return working_copy if working_copy.is_dir() else None
+
+
+def _relative_scan_path(location: str, scan_root: Path) -> str:
+    path = Path(location)
+    try:
+        return str(path.relative_to(scan_root))
+    except ValueError:
+        return str(path)
+
+
+def prepare_child_theme_repair(
+    backup_root: Path,
+    original_theme_root: Path,
+    scan: ChildThemeScan,
+    *,
+    scan_root: Path | None = None,
+) -> tuple[Path, bool]:
+    """Create/update repair metadata without ever modifying or overwriting the backup.
+
+    The original theme is copied only when the repair workspace does not already
+    exist. Once a technician edits the working copy, later scans only refresh the
+    metadata files beside it and never overwrite technician changes.
+    """
+    workspace = child_theme_repair_workspace(backup_root, scan.slug).parent
+    working_copy = workspace / "working-copy"
+    created = False
+
+    if not working_copy.exists():
+        if not original_theme_root.is_dir():
+            raise ValueError(f"Cannot create repair workspace; original child theme is missing: {original_theme_root}")
+        workspace.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(original_theme_root, working_copy)
+        created = True
+
+    source_root = scan_root or Path(scan.path)
+    report_payload = scan.to_dict()
+    report_payload.update(
+        {
+            "immutable_backup_theme": str(original_theme_root),
+            "repair_working_copy": str(working_copy),
+            "working_copy_created": created,
+            "instructions": "Edit only repair_working_copy. Never edit immutable_backup_theme.",
+        }
+    )
+    (workspace / "scan-report.json").write_text(
+        json.dumps(report_payload, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    lines = [
+        "CHILD THEME REPAIR WORKSPACE",
+        "",
+        f"Backup goc - KHONG SUA: {original_theme_root}",
+        f"Thu muc ky thuat can sua: {working_copy}",
+        "",
+        "FILE NGHI VAN / CAN KIEM TRA:",
+    ]
+    if scan.unreadable_files:
+        for item in scan.unreadable_files:
+            lines.append(f"- UNREADABLE: {item}")
+    if scan.findings:
+        for finding in scan.findings:
+            reasons = "; ".join(signal.reason for signal in finding.signals)
+            relative = _relative_scan_path(finding.location, source_root)
+            lines.append(
+                f"- {finding.severity.value} {finding.score}/100: {relative} | {reasons}"
+            )
+    if not scan.unreadable_files and not scan.findings:
+        lines.append("- Khong co finding nao trong lan scan nay.")
+    lines.extend(
+        [
+            "",
+            "QUY TRINH:",
+            "1. Ky thuat chi sua file trong working-copy.",
+            "2. Khong sua/xoa file trong backups/.",
+            "3. Chay lai rebuild-theme-config.",
+            "4. Tool se uu tien scan working-copy; chi PASS moi upload theme con.",
+            "",
+        ]
+    )
+    (workspace / "SUSPECT_FILES.txt").write_text("\n".join(lines), encoding="utf-8")
+    return working_copy, created
+
+
 def _zip_member_path(info: zipfile.ZipInfo) -> PurePosixPath:
     normalized = PurePosixPath(info.filename.replace("\\", "/"))
     if normalized.is_absolute() or ".." in normalized.parts:
@@ -476,6 +572,9 @@ __all__ = [
     "DEFAULT_FLATSOME_PACKAGE",
     "detect_active_theme",
     "scan_child_theme",
+    "child_theme_repair_workspace",
+    "existing_child_theme_repair",
+    "prepare_child_theme_repair",
     "install_flatsome",
     "install_child_theme",
     "plan_theme_stage",

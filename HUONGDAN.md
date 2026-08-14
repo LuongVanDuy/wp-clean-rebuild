@@ -1,10 +1,26 @@
 # HƯỚNG DẪN SỬ DỤNG WP CLEAN REBUILD
 
-# PHẦN A — NHÂN SỰ CHỈ CẦN CHẠY 1 FILE
+# PHẦN A — NHÂN SỰ CHỈ CẦN MỞ GIAO DIỆN
 
-## BƯỚC 1 — Mở trình xử lý tự động
+## BƯỚC 1 — Mở giao diện điều khiển
 
 **Câu lệnh:**
+
+```powershell
+.\GIAODIEN.bat
+```
+
+`GIAODIEN.bat` sẽ tự kiểm tra `uv`, Python 3.13 và thư viện dự án. Nếu máy mới còn thiếu thành phần, hệ thống sẽ hỏi và hỗ trợ cài tự động.
+
+Sau đó trình duyệt tự mở giao diện local tại địa chỉ dạng:
+
+```text
+http://127.0.0.1:8765/
+```
+
+GUI chỉ bind `127.0.0.1`, không mở dịch vụ cho máy khác trong mạng LAN.
+
+Nếu GUI gặp sự cố, kỹ thuật vẫn có thể dùng workflow terminal dự phòng:
 
 ```powershell
 .\BATDAU.bat
@@ -12,16 +28,23 @@
 
 ---
 
-# PHẦN B — BATDAU SẼ TỰ LÀM GÌ
+# PHẦN B — GIAO DIỆN SẼ TỰ LÀM GÌ
 
-`BATDAU.bat` là workflow chính dành cho nhân sự vận hành.
+Nhân sự không cần nhớ command kỹ thuật. Trên dashboard chỉ cần:
 
-Trình hướng dẫn sẽ tự chạy theo thứ tự:
+```text
+chọn dự án cũ hoặc Tạo dự án mới
+→ Test FTP
+→ bấm Tiếp tục
+→ hệ thống tự chạy các bước an toàn liên tiếp
+→ chỉ dừng khi cần người dùng xác nhận
+```
+
+Flow chính:
 
 ```text
 Kiểm tra môi trường
-→ nếu thiếu uv/Python/thư viện thì hỏi có cài tự động hay không
-→ chọn dự án cũ hoặc tạo dự án mới
+→ chọn/tạo dự án
 → test FTP + đúng remotePath
 → backup file
 → backup database
@@ -29,65 +52,88 @@ Kiểm tra môi trường
 → scan database/uploads
 → tạo clean staging
 → preflight
-→ hỏi xác nhận trước bước phá hủy
+→ yêu cầu nhập lại domain trước destructive rebuild
 → rebuild WordPress + database sạch
 → xử lý Flatsome/theme con
 → xử lý plugin WordPress.org/plugin private
-→ final verify
-→ PASS / PASS WITH WARNINGS / BLOCKED
+→ quét/khôi phục MU-plugin sạch
+→ kiểm tra nhanh frontend + wp-admin
+→ nhân sự xác nhận hoàn tất
 ```
 
 ## Tạo dự án mới
 
-Wizard sẽ hỏi và tự sinh file trong:
+Bấm **Tạo dự án** trên giao diện và nhập:
 
 ```text
-sites\<ten-du-an>.json
-```
-
-Các thông tin cần nhập:
-
-```text
+Tên dự án
 FTP host
 tài khoản FTP
 mật khẩu FTP
-ftp / ftps
+FTP / FTPS
 port
 remotePath
 siteUrl
-passive mode
 workers
 blockMb
+```
+
+GUI tự sinh:
+
+```text
+sites\<ten-du-an>.json
 ```
 
 `sites/*.json` đã nằm trong `.gitignore`, không được commit credential lên GitHub.
 
 ## Chọn dự án cũ
 
-Wizard tự đọc các report hiện có và đề xuất bước cần chạy tiếp.
+Dashboard tự đọc backup/report/state và hiển thị phần trăm tiến độ cùng bước tiếp theo.
 
 Ví dụ:
 
 ```text
 đã backup nhưng chưa clean
-→ tiếp tục từ clean
+→ Tiếp tục từ clean
 
 đã rebuild core/database nhưng theme con đang sửa
-→ tiếp tục từ theme
+→ Tiếp tục từ theme
 
-đã xong theme/plugin nhưng final verify lỗi
-→ chạy lại final verify
+đã xong theme/plugin/MU-plugin
+→ Kiểm tra nhanh website
 ```
 
-Sau khi đã có bằng chứng `rebuild_ready`, wizard không được quay ngược lại backup/rebuild chỉ vì thiếu metadata cũ.
+Sau khi đã có bằng chứng `rebuild_ready`, GUI không quay ngược lại backup/rebuild chỉ vì thiếu metadata cũ.
+
+Nếu rebuild đã đi qua destructive boundary nhưng database chưa import xong, GUI ưu tiên:
+
+```text
+DB-only resume
+```
+
+không wipe website lần nữa.
+
+## Rebuild phá hủy
+
+GUI không tự chạy destructive rebuild ngay.
+
+Trước khi rebuild, người vận hành phải nhập lại đúng domain dự án. Ví dụ:
+
+```text
+noithatdaiduong.com
+```
+
+sau đó mới bấm xác nhận.
 
 ## Theme con bị nghi mã độc
 
-Wizard dừng và chỉ rõ:
+GUI dừng và hiển thị working-copy:
 
 ```text
 repairs\<domain>\themes\<child-theme>\working-copy
 ```
+
+Bấm **Mở thư mục sửa** để mở Windows Explorer.
 
 Kỹ thuật chỉ sửa `working-copy`.
 
@@ -97,13 +143,7 @@ Không sửa:
 backups\<domain>\themes\<child-theme>
 ```
 
-Sau khi sửa xong, chạy lại:
-
-```powershell
-.\BATDAU.bat
-```
-
-Wizard tự quay lại bước theme và scan lại working-copy.
+Sau khi sửa xong, bấm **Quét lại & tiếp tục**. Chỉ theme con PASS mới được upload.
 
 ## Plugin
 
@@ -120,36 +160,60 @@ Plugin không có trên WordPress.org:
 
 ```text
 không restore code backup
-→ báo nhân sự cài bản sạch thủ công từ vendor
+→ GUI báo nhân sự cài bản sạch thủ công từ vendor
 ```
 
-## Final verify
+## MU-plugin
 
-Wizard kiểm tra:
+Sau plugin thường, GUI chạy MU-plugin stage:
 
 ```text
-WordPress core checksum
-PHP/executable trong uploads
-known malware markers
-file bridge/temp còn sót
-file thực thi lạ ở root
-frontend HTTP
-/wp-admin HTTP
+scan theo component
+→ component sạch mới upload
+→ component HIGH/CRITICAL hoặc unreadable bị block toàn bộ
 ```
 
-Kết quả cuối:
+## Kiểm tra cuối
+
+Mặc định GUI dùng chế độ nhanh:
 
 ```text
-✅ PASS
-⚠ PASS WITH WARNINGS
-❌ BLOCKED
+HTTP frontend
+HTTP /wp-admin
+→ nhân sự mở website kiểm tra warning PHP / giao diện / chức năng chính
+→ xác nhận hoàn tất
 ```
+
+Deep live filesystem/checksum scan không chạy mặc định để tiết kiệm thời gian.
+
+Kỹ thuật vẫn có thể chọn **Quét sâu** trên GUI hoặc chạy command kỹ thuật bên dưới khi cần.
+
+## Xóa dự án hoàn tất
+
+Sau khi project hoàn tất, GUI có nút **Xóa dự án local**.
+
+Nút này chỉ xóa dữ liệu local của tool:
+
+```text
+sites\<project>.json
+backups\...
+reports\...
+repairs\...
+```
+
+Website trên hosting không bị xóa hoặc sửa.
 
 ---
 
 # PHẦN C — COMMAND KỸ THUẬT / RECOVERY
 
 Các command dưới đây dành cho kỹ thuật, không phải workflow thông thường của nhân sự.
+
+## Workflow terminal dự phòng
+
+```powershell
+.\BATDAU.bat
+```
 
 ## Kiểm tra môi trường
 
@@ -225,10 +289,22 @@ Không chạy lại `--execute` chỉ để sửa lỗi theme/plugin/database sa
 .\wpclean.bat rebuild-plugin-config .\sites\ftp.json .\backups\<domain>
 ```
 
-## Final verify-only
+## MU-plugin-only
+
+```powershell
+.\wpclean.bat rebuild-mu-plugins-config .\sites\ftp.json .\backups\<domain>
+```
+
+## Deep final verify-only
 
 ```powershell
 .\wpclean.bat verify-live-config .\sites\ftp.json .\backups\<domain>
+```
+
+## Xóa dự án bằng terminal
+
+```powershell
+.\XOADUAN.bat
 ```
 
 ---
@@ -238,7 +314,9 @@ Không chạy lại `--execute` chỉ để sửa lỗi theme/plugin/database sa
 1. Backup gốc là immutable evidence, không sửa trực tiếp.
 2. Malware chỉ bị loại khỏi clean/repair/restore path.
 3. Không restore mù plugin/theme PHP từ site đã nhiễm.
-4. Destructive rebuild chỉ chạy sau backup + clean + preflight.
-5. Nếu theme con bị block, sửa `repairs/.../working-copy` rồi chạy `BATDAU.bat` lại.
+4. Destructive rebuild chỉ chạy sau backup + clean + preflight và xác nhận rõ ràng.
+5. Nếu theme con bị block, chỉ sửa `repairs/.../working-copy` rồi quét lại.
 6. Nếu plugin private/premium cần dùng, upload bản sạch từ vendor.
-7. Chỉ bàn giao khi final verify đạt `PASS` hoặc đã hiểu rõ mọi warning trong `PASS WITH WARNINGS`.
+7. MU-plugin bị HIGH/CRITICAL hoặc unreadable không được upload.
+8. GUI mặc định dùng final quick check; deep scan dành cho kỹ thuật khi cần.
+9. Không whitelist toàn bộ project trong antivirus vì `backups/` có thể chứa malware thật.

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import platform
 import sys
@@ -177,6 +178,106 @@ def scan_uploads(path: Path = typer.Argument(..., exists=True, file_okay=False))
     findings = run_upload_scan(path)
     show_findings(findings)
     raise typer.Exit(code=1 if findings else 0)
+
+
+@app.command("scan-backup")
+def scan_backup(
+    backup_root: Path = typer.Argument(..., exists=True, file_okay=False),
+) -> None:
+    """Scan a complete backup root and automatically locate database/uploads."""
+    console.print(f"Backup root: {backup_root}")
+
+    manifest = backup_root / "manifest.json"
+    if manifest.exists():
+        ok, problems = verify_manifest(backup_root, manifest)
+        if ok:
+            console.print("[green]Backup manifest verification passed.[/green]")
+        else:
+            console.print("[red]Backup manifest verification failed; scan aborted.[/red]")
+            for problem in problems:
+                console.print(f" - {problem}")
+            raise typer.Exit(code=2)
+    else:
+        console.print("[yellow]No manifest.json found; continuing in audit mode.[/yellow]")
+
+    report_path = backup_root / "backup-report.json"
+    if report_path.exists():
+        try:
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            missing = [item for item in report.get("items", []) if item.get("status") != "ok"]
+            if missing:
+                console.print("[yellow]Backup report contains skipped/missing items:[/yellow]")
+                for item in missing:
+                    console.print(f" - {item.get('remote_path')}: {item.get('error') or item.get('status')}")
+        except Exception as exc:
+            console.print(f"[yellow]Could not parse backup-report.json: {exc}[/yellow]")
+
+    sql_path = backup_root / "database" / "original.sql"
+    if sql_path.exists():
+        console.print(f"\n[bold]Database scan:[/bold] {sql_path}")
+        db_findings = run_sql_scan(sql_path)
+        show_findings(db_findings)
+    else:
+        console.print("[yellow]Database backup not found at database/original.sql.[/yellow]")
+
+    upload_candidates = [
+        backup_root / "uploads",
+        backup_root / "wp-content" / "uploads",
+    ]
+    uploads_path = next((p for p in upload_candidates if p.exists() and p.is_dir()), None)
+
+    if uploads_path is None:
+        console.print("[yellow]Uploads backup directory was not found.[/yellow]")
+        console.print("Checked:")
+        for candidate in upload_candidates:
+            console.print(f" - {candidate}")
+        console.print("Run [bold]backup-status[/bold] to inspect which filesystem stages were actually saved.")
+        return
+
+    console.print(f"\n[bold]Uploads scan:[/bold] {uploads_path}")
+    upload_findings = run_upload_scan(uploads_path)
+    show_findings(upload_findings)
+
+
+@app.command("backup-status")
+def backup_status(
+    backup_root: Path = typer.Argument(..., exists=True, file_okay=False),
+) -> None:
+    """Show what a backup contains and why any expected stage is missing."""
+    console.print(f"Backup root: {backup_root.resolve()}")
+
+    expected = {
+        "database": backup_root / "database" / "original.sql",
+        "uploads": backup_root / "uploads",
+        "themes": backup_root / "themes",
+        "plugins": backup_root / "plugins",
+        "mu-plugins": backup_root / "mu-plugins",
+        "config": backup_root / "config",
+        "manifest": backup_root / "manifest.json",
+    }
+    for name, path in expected.items():
+        if path.exists():
+            if path.is_file():
+                console.print(f"[green]✓[/green] {name}: {path} ({_human_bytes(path.stat().st_size)})")
+            else:
+                file_count = sum(1 for p in path.rglob("*") if p.is_file())
+                console.print(f"[green]✓[/green] {name}: {path} ({file_count} files)")
+        else:
+            console.print(f"[red]✗[/red] {name}: missing ({path})")
+
+    report_path = backup_root / "backup-report.json"
+    if report_path.exists():
+        try:
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            console.print("\n[bold]Filesystem backup report:[/bold]")
+            for item in report.get("items", []):
+                status = item.get("status", "unknown")
+                icon = "[green]✓[/green]" if status == "ok" else "[yellow]![/yellow]"
+                console.print(f"{icon} {item.get('remote_path')} -> {item.get('local_path')} | {status}")
+                if item.get("error"):
+                    console.print(f"    {item.get('error')}")
+        except Exception as exc:
+            console.print(f"[yellow]Could not parse backup-report.json: {exc}[/yellow]")
 
 
 @app.command("manifest")

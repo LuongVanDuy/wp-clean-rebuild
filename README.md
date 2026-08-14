@@ -16,7 +16,36 @@ V0.2 implements the safe backup/audit foundation:
 - Backup of uploads, themes, plugins, mu-plugins and forensic config files.
 - Destructive rebuild remains locked until verified backup/rollback requirements are complete.
 
-## Install
+## Windows — easiest setup
+
+You do **not** need to install Python manually.
+
+1. Pull/download the latest repository.
+2. Double-click `START.bat`.
+3. If `uv` is missing, setup shows the official download source and asks for confirmation.
+4. Press `Y` to install `uv`.
+5. Setup installs managed Python 3.13 and all project dependencies automatically.
+6. After setup, run commands through `wpclean.bat`.
+
+Example:
+
+```powershell
+.\wpclean.bat doctor
+.\wpclean.bat --help
+```
+
+The bootstrap downloads uv only from the official Astral installer at `https://astral.sh/uv/install.ps1`.
+
+### Update an existing clone
+
+```powershell
+git pull
+.\START.bat
+```
+
+## Manual development setup
+
+For developers who already manage Python themselves:
 
 ```bash
 python -m venv .venv
@@ -32,35 +61,37 @@ pip install -e .
 
 ## Commands
 
-```bash
-wpclean doctor
-wpclean scan-sql database.sql
-wpclean scan-uploads ./wp-content/uploads
-wpclean manifest ./backup
-wpclean verify-backup ./backup
+With the Windows launcher:
+
+```powershell
+.\wpclean.bat doctor
+.\wpclean.bat scan-sql database.sql
+.\wpclean.bat scan-uploads .\wp-content\uploads
+.\wpclean.bat manifest .\backup
+.\wpclean.bat verify-backup .\backup
 ```
 
 ### Test FTP/FTPS
 
 Password is prompted securely by default, or can be supplied through the environment variable `WPCLEAN_FTP_PASSWORD`.
 
-```bash
-wpclean ftp-test \
-  --host ftp.example.com \
-  --user account \
+```powershell
+.\wpclean.bat ftp-test `
+  --host ftp.example.com `
+  --user account `
   --tls
 ```
 
 ### High-speed WordPress filesystem backup
 
-```bash
-wpclean backup-ftp \
-  --host ftp.example.com \
-  --user account \
-  --remote-root /public_html \
-  --out ./backups/example.com \
-  --tls \
-  --workers 6 \
+```powershell
+.\wpclean.bat backup-ftp `
+  --host ftp.example.com `
+  --user account `
+  --remote-root /public_html `
+  --out .\backups\example.com `
+  --tls `
+  --workers 6 `
   --block-mb 1
 ```
 

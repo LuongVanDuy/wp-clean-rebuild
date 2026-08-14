@@ -4,6 +4,7 @@ import json
 import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path, PurePosixPath
+from typing import Callable
 
 from .backup import verify_manifest
 from .transport import FTPTransport, RemoteFile
@@ -36,6 +37,8 @@ BACKED_PREFIXES = {
     "wp-content/plugins/": "plugins",
     "wp-content/mu-plugins/": "mu-plugins",
 }
+
+PreflightProgressCallback = Callable[[dict], None]
 
 
 @dataclass(slots=True)
@@ -131,24 +134,39 @@ def run_rebuild_preflight(
     remote_root: str,
     backup_root: Path,
     report_path: Path,
+    progress: PreflightProgressCallback | None = None,
 ) -> RebuildPreflightReport:
     clean_root = backup_root / "clean"
     original_manifest = backup_root / "manifest.json"
     clean_manifest = clean_root / "manifest.json"
 
+    if progress:
+        progress({"phase": "verify_original"})
     if not original_manifest.is_file():
         raise ValueError("Original backup manifest.json is missing.")
     original_ok, original_problems = verify_manifest(backup_root, original_manifest)
     if not original_ok:
         raise ValueError("Original backup verification failed: " + "; ".join(original_problems))
 
+    if progress:
+        progress({"phase": "verify_clean"})
     if not clean_manifest.is_file():
         raise ValueError("Clean staging manifest.json is missing. Run prepare-clean-config first.")
     clean_ok, clean_problems = verify_manifest(clean_root, clean_manifest)
     if not clean_ok:
         raise ValueError("Clean staging verification failed: " + "; ".join(clean_problems))
 
-    remote_files = transport.list_files_recursive(remote_root)
+    if progress:
+        progress({"phase": "inventory_start", "remote_root": remote_root})
+
+    def inventory_progress(event: dict) -> None:
+        if progress:
+            progress({"phase": "inventory", **event})
+
+    remote_files = transport.list_files_recursive(remote_root, progress=inventory_progress)
+
+    if progress:
+        progress({"phase": "classify", "files_found": len(remote_files)})
     classified = [
         _classify(item, remote_root=remote_root, backup_root=backup_root)
         for item in remote_files
@@ -183,4 +201,6 @@ def run_rebuild_preflight(
 
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(json.dumps(asdict(report), indent=2, ensure_ascii=False), encoding="utf-8")
+    if progress:
+        progress({"phase": "complete", "files_found": len(classified), "blocked_files": len(blocked)})
     return report

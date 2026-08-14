@@ -12,7 +12,7 @@ dependencies = [
 ]
 
 [project.scripts]
-wpclean = "wpclean.cli:app"
+wpclean = "wpclean.entry:app"
 
 [build-system]
 requires = ["setuptools>=69", "wheel"]

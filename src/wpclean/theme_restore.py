@@ -5,6 +5,7 @@ import hashlib
 import json
 from pathlib import Path, PurePosixPath
 import re
+import stat
 from tempfile import TemporaryDirectory
 from typing import Callable
 import zipfile
@@ -20,6 +21,9 @@ ProgressCallback = Callable[[dict], None]
 DEFAULT_FLATSOME_PACKAGE = Path(__file__).resolve().parents[2] / "themes" / "flatsome.zip"
 PHP_SUFFIXES = {".php", ".phtml", ".phar", ".php3", ".php4", ".php5", ".php7", ".php8"}
 TEXT_SUFFIXES = PHP_SUFFIXES | {".js", ".css", ".htaccess", ".txt", ".json", ".xml"}
+MAX_THEME_ZIP_FILES = 50000
+MAX_THEME_ZIP_UNCOMPRESSED = 512 * 1024 * 1024
+MAX_STYLE_CSS_BYTES = 512 * 1024
 
 OBFUSCATION = re.compile(rb"\b(?:base64_decode|gzinflate|gzdecode|str_rot13|hex2bin)\s*\(", re.I)
 DYNAMIC_EXECUTION = re.compile(rb"\b(?:eval|assert)\s*\(", re.I)
@@ -120,7 +124,6 @@ def _find_option_value(sql: str, option_name: str) -> str | None:
     if matches:
         return _sql_unescape(matches[-1])
 
-    # Fallback for dumps that omit option_id and insert option_name first.
     fallback = re.compile(
         rf"\(\s*'{re.escape(option_name)}'\s*,\s*'((?:\\.|[^'])*)'\s*,",
         re.I,
@@ -140,17 +143,21 @@ def detect_active_theme(clean_sql: Path) -> ActiveTheme | None:
     return ActiveTheme(template=template.strip(), stylesheet=stylesheet.strip())
 
 
-def _read_theme_header(style_css: Path) -> dict[str, str]:
-    try:
-        text = style_css.read_text(encoding="utf-8", errors="replace")[:16384]
-    except OSError:
-        return {}
+def _parse_theme_header_text(text: str) -> dict[str, str]:
     headers: dict[str, str] = {}
     for key in ("Theme Name", "Template", "Version"):
         match = re.search(rf"^\s*{re.escape(key)}\s*:\s*(.+?)\s*$", text, re.I | re.M)
         if match:
             headers[key.lower().replace(" ", "_")] = match.group(1).strip()
     return headers
+
+
+def _read_theme_header(style_css: Path) -> dict[str, str]:
+    try:
+        text = style_css.read_text(encoding="utf-8", errors="replace")[:16384]
+    except OSError:
+        return {}
+    return _parse_theme_header_text(text)
 
 
 def _score_child_file(path: Path, data: bytes) -> Finding | None:
@@ -292,7 +299,59 @@ def scan_child_theme(
     return report
 
 
+def _zip_member_path(info: zipfile.ZipInfo) -> PurePosixPath:
+    normalized = PurePosixPath(info.filename.replace("\\", "/"))
+    if normalized.is_absolute() or ".." in normalized.parts:
+        raise ValueError(f"Unsafe path in Flatsome ZIP: {info.filename}")
+    return normalized
+
+
+def _zip_member_is_symlink(info: zipfile.ZipInfo) -> bool:
+    mode = (info.external_attr >> 16) & 0xFFFF
+    return bool(mode and stat.S_ISLNK(mode))
+
+
+def _find_flatsome_archive_root(archive: zipfile.ZipFile) -> PurePosixPath:
+    candidates: list[PurePosixPath] = []
+    for info in archive.infolist():
+        if info.is_dir():
+            continue
+        path = _zip_member_path(info)
+        if path.name.lower() != "style.css" or info.file_size > MAX_STYLE_CSS_BYTES:
+            continue
+        try:
+            with archive.open(info) as fh:
+                text = fh.read(MAX_STYLE_CSS_BYTES).decode("utf-8", errors="replace")
+        except (OSError, RuntimeError, zipfile.BadZipFile):
+            continue
+        headers = _parse_theme_header_text(text)
+        theme_name = headers.get("theme_name", "").strip().lower()
+        if theme_name == "flatsome" or theme_name.startswith("flatsome "):
+            candidates.append(path.parent)
+
+    if not candidates:
+        raise ValueError("Flatsome ZIP validation failed: no style.css declaring Theme Name: Flatsome was found.")
+
+    unique = list(dict.fromkeys(candidates))
+    named_flatsome = [root for root in unique if root.name.lower() == "flatsome"]
+    if len(named_flatsome) == 1:
+        return named_flatsome[0]
+    if len(unique) == 1:
+        return unique[0]
+    raise ValueError(
+        "Flatsome ZIP validation failed: multiple possible Flatsome theme roots were found: "
+        + ", ".join(str(item) for item in unique[:10])
+    )
+
+
 def _safe_extract_flatsome(package: Path, destination: Path) -> tuple[Path, str]:
+    """Extract only the actual Flatsome theme subtree into a local temp directory.
+
+    ZIP packages may contain documentation, license files, __MACOSX metadata, or
+    extra top-level directories. We locate the installable theme by reading
+    style.css inside the archive, extract that subtree locally, validate it, and
+    only then allow the FTP upload stage to begin.
+    """
     if not package.is_file() or package.stat().st_size == 0:
         raise ValueError(f"Trusted Flatsome package is missing or empty: {package}")
 
@@ -301,48 +360,65 @@ def _safe_extract_flatsome(package: Path, destination: Path) -> tuple[Path, str]
         while chunk := fh.read(1024 * 1024):
             digest.update(chunk)
 
+    destination.mkdir(parents=True, exist_ok=True)
+    destination_resolved = destination.resolve()
+
     try:
         with zipfile.ZipFile(package) as archive:
-            members = [item for item in archive.infolist() if not item.is_dir()]
-            if not members:
+            infos = archive.infolist()
+            file_infos = [item for item in infos if not item.is_dir()]
+            if not file_infos:
                 raise ValueError("Flatsome ZIP is empty.")
+            if len(file_infos) > MAX_THEME_ZIP_FILES:
+                raise ValueError(f"Flatsome ZIP contains too many files: {len(file_infos)}")
+            total_uncompressed = sum(max(0, item.file_size) for item in file_infos)
+            if total_uncompressed > MAX_THEME_ZIP_UNCOMPRESSED:
+                raise ValueError(
+                    f"Flatsome ZIP expands beyond safety limit: {total_uncompressed} bytes"
+                )
 
-            roots = {
-                PurePosixPath(item.filename.replace("\\", "/")).parts[0]
-                for item in members
-                if PurePosixPath(item.filename.replace("\\", "/")).parts
-            }
-            by_lower = {item.lower(): item for item in roots}
-            candidate_root = by_lower.get("flatsome") or (next(iter(roots)) if len(roots) == 1 else "")
-            if not candidate_root:
-                raise ValueError("Flatsome ZIP must contain one installable theme root.")
+            theme_root = _find_flatsome_archive_root(archive)
+            extracted_files = 0
 
-            for member in archive.infolist():
-                normalized = PurePosixPath(member.filename.replace("\\", "/"))
-                if not normalized.parts or normalized.parts[0] != candidate_root:
+            for info in infos:
+                archive_path = _zip_member_path(info)
+                if _zip_member_is_symlink(info):
+                    raise ValueError(f"Symlink is not allowed in Flatsome ZIP: {info.filename}")
+                try:
+                    relative = archive_path.relative_to(theme_root)
+                except ValueError:
                     continue
-                rel = PurePosixPath(*normalized.parts[1:])
-                if not rel.parts:
+                if not relative.parts or str(relative) == ".":
                     continue
-                target = destination.joinpath(*rel.parts)
+
+                target = destination.joinpath(*relative.parts)
                 resolved = target.resolve()
-                dest_resolved = destination.resolve()
-                if dest_resolved not in resolved.parents and resolved != dest_resolved:
-                    raise ValueError(f"Unsafe path in Flatsome ZIP: {member.filename}")
-                if member.is_dir():
+                if destination_resolved not in resolved.parents and resolved != destination_resolved:
+                    raise ValueError(f"Unsafe path in Flatsome ZIP: {info.filename}")
+
+                if info.is_dir():
                     target.mkdir(parents=True, exist_ok=True)
-                else:
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    with archive.open(member) as src, target.open("wb") as dst:
-                        while chunk := src.read(1024 * 1024):
-                            dst.write(chunk)
+                    continue
+
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with archive.open(info) as src, target.open("wb") as dst:
+                    while chunk := src.read(1024 * 1024):
+                        dst.write(chunk)
+                extracted_files += 1
+
+            if extracted_files == 0:
+                raise ValueError("Flatsome ZIP validation failed: theme subtree contained no files.")
     except zipfile.BadZipFile as exc:
         raise ValueError("Trusted Flatsome package is not a valid ZIP archive.") from exc
 
     style_css = destination / "style.css"
     headers = _read_theme_header(style_css)
-    if not style_css.is_file() or "flatsome" not in headers.get("theme_name", "").lower():
-        raise ValueError("Flatsome ZIP validation failed: style.css does not identify Flatsome.")
+    theme_name = headers.get("theme_name", "").strip().lower()
+    if not style_css.is_file() or not (theme_name == "flatsome" or theme_name.startswith("flatsome ")):
+        raise ValueError("Flatsome ZIP validation failed after extraction: style.css does not identify Flatsome.")
+    if not (destination / "functions.php").is_file():
+        raise ValueError("Flatsome ZIP validation failed after extraction: functions.php is missing.")
+
     return destination, digest.hexdigest()
 
 

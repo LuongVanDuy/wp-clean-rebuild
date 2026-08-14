@@ -72,8 +72,13 @@ def rebuild_preflight(
         None,
         help="Verified backup root. Defaults to ./backups/<host>.",
     ),
+    fast: bool = typer.Option(
+        False,
+        "--fast",
+        help="Skip duplicate recursive remote inventory; verify local recovery artifacts and configured remote root only.",
+    ),
 ) -> None:
-    """Verify backups and produce a non-destructive remote wipe plan."""
+    """Verify recovery artifacts and produce a non-destructive rebuild gate."""
     profile = load_site_profile(config)
     backup_root = backup_root or Path("backups") / profile.host
     if not backup_root.exists() or not backup_root.is_dir():
@@ -87,6 +92,8 @@ def rebuild_preflight(
     console.print(f"Original backup: {backup_root}")
     console.print(f"Clean staging: {backup_root / 'clean'}")
     console.print("[cyan]This command is read-only on the remote site. Nothing will be deleted or uploaded.[/cyan]")
+    if fast:
+        console.print("[yellow]FAST mode: recursive remote scan is skipped. The execute stage will enumerate once while wiping.[/yellow]")
 
     with console.status("[cyan]Starting rebuild preflight...[/cyan]", spinner="dots") as status:
         def on_progress(event: dict) -> None:
@@ -96,6 +103,9 @@ def rebuild_preflight(
                 return
             if phase == "verify_clean":
                 status.update("[cyan]Verifying clean staging SHA-256...[/cyan]")
+                return
+            if phase == "verify_remote_root":
+                status.update("[cyan]Verifying configured remote WordPress root...[/cyan]")
                 return
             if phase == "inventory_start":
                 status.update("[cyan]Scanning remote WordPress filesystem over FTP...[/cyan]")
@@ -123,6 +133,9 @@ def rebuild_preflight(
                     f"[cyan]Classifying {event.get('files_found', 0)} remote files against backup coverage...[/cyan]"
                 )
                 return
+            if phase == "complete_fast":
+                status.update("[cyan]Fast preflight complete.[/cyan]")
+                return
             if phase == "complete":
                 status.update(
                     f"[cyan]Preflight analysis complete: files={event.get('files_found', 0)} | blocked={event.get('blocked_files', 0)}[/cyan]"
@@ -136,6 +149,7 @@ def rebuild_preflight(
                 backup_root=backup_root,
                 report_path=report_path,
                 progress=on_progress,
+                fast=fast,
             )
         except (ValueError, RuntimeError) as exc:
             console.print(f"[red]Rebuild preflight blocked:[/red] {exc}")
@@ -143,30 +157,37 @@ def rebuild_preflight(
 
     console.print("\n[green]✓ Original backup verified[/green]")
     console.print("[green]✓ Clean staging verified[/green]")
-    console.print(f"Remote files inventoried: {report.remote_files}")
-    console.print(f"Planned wipe: {report.wipe_files}")
-    console.print(f"Preserve: {report.preserve_files}")
-    console.print(f"Blocked/unknown: {report.blocked_files}")
+    console.print("[green]✓ Configured remote WordPress root verified[/green]")
+    console.print(f"Preflight mode: {report.mode.upper()}")
 
-    if report.preserve:
-        console.print("\n[bold]Preserved remote paths:[/bold]")
-        for item in report.preserve[:20]:
-            console.print(f" - [cyan]{item.path}[/cyan]: {item.reason}")
-        if len(report.preserve) > 20:
-            console.print(f" - ... and {len(report.preserve) - 20} more (see report)")
+    if report.mode == "full":
+        console.print(f"Remote files inventoried: {report.remote_files}")
+        console.print(f"Planned wipe: {report.wipe_files}")
+        console.print(f"Preserve: {report.preserve_files}")
+        console.print(f"Blocked/unknown: {report.blocked_files}")
 
-    if report.blocked:
-        console.print("\n[red]DESTRUCTIVE REBUILD REMAINS LOCKED.[/red]")
-        console.print("Unknown, unbacked, or drifted files were found:")
-        for item in report.blocked[:30]:
-            console.print(f" - [red]{item.path}[/red]: {item.reason}")
-        if len(report.blocked) > 30:
-            console.print(f" - ... and {len(report.blocked) - 30} more (see report)")
-        console.print(f"Full report: {report_path}")
-        raise typer.Exit(code=2)
+        if report.preserve:
+            console.print("\n[bold]Preserved remote paths:[/bold]")
+            for item in report.preserve[:20]:
+                console.print(f" - [cyan]{item.path}[/cyan]: {item.reason}")
+            if len(report.preserve) > 20:
+                console.print(f" - ... and {len(report.preserve) - 20} more (see report)")
+
+        if report.blocked:
+            console.print("\n[red]DESTRUCTIVE REBUILD REMAINS LOCKED.[/red]")
+            console.print("Unknown, unbacked, or drifted files were found:")
+            for item in report.blocked[:30]:
+                console.print(f" - [red]{item.path}[/red]: {item.reason}")
+            if len(report.blocked) > 30:
+                console.print(f" - ... and {len(report.blocked) - 30} more (see report)")
+            console.print(f"Full report: {report_path}")
+            raise typer.Exit(code=2)
+    else:
+        console.print("Remote recursive inventory: SKIPPED")
+        console.print("Wipe scope: everything inside configured WordPress root except explicit hosting-preserve paths")
 
     console.print("\n[bold green]PREFLIGHT PASS — destructive rebuild may be unlocked in the next stage.[/bold green]")
-    console.print(f"Wipe plan report: {report_path}")
+    console.print(f"Preflight report: {report_path}")
     for warning in report.warnings:
         console.print(f"[yellow]Warning: {warning}[/yellow]")
 

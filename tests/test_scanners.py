@@ -17,7 +17,8 @@ def test_sql_compound_payload_is_flagged(tmp_path: Path):
 def test_php_hidden_as_image_is_critical(tmp_path: Path):
     uploads = tmp_path / "uploads"
     uploads.mkdir()
-    (uploads / "photo.jpg").write_bytes(b"\xff\xd8\xfffake-image<?php echo 'x';")
+    payload = b"\xff\xd8\xfffake-image" + b"<?php echo base64_decode($_POST['x']); ?>" + b"A" * 600
+    (uploads / "photo.jpg").write_bytes(payload)
     findings = scan_uploads(uploads)
     assert findings
     assert findings[0].score >= 80
@@ -33,6 +34,25 @@ def test_bare_php_like_binary_bytes_do_not_flag_media(tmp_path: Path):
     (uploads / "normal.webp").write_bytes(b"RIFFxxxxWEBP" + b"\x00" * 20 + b"<?" + b"\x88\x99" * 100)
     findings = scan_uploads(uploads)
     assert findings == []
+
+
+def test_random_short_echo_bytes_in_binary_media_do_not_flag(tmp_path: Path):
+    uploads = tmp_path / "uploads"
+    uploads.mkdir()
+    binary = b"\x89PNG\r\n\x1a\n" + (b"\xff\x80\x01\x9a" * 100) + b"<?=9\xff\x80garbage" + (b"\x81\xfe" * 300)
+    (uploads / "normal.png").write_bytes(binary)
+    findings = scan_uploads(uploads)
+    assert findings == []
+
+
+def test_textual_short_echo_payload_in_media_is_flagged(tmp_path: Path):
+    uploads = tmp_path / "uploads"
+    uploads.mkdir()
+    payload = b"RIFFxxxxWEBP" + b"A" * 128 + b"<?= $_GET['cmd']; ?>" + b" " * 600
+    (uploads / "polyglot.webp").write_bytes(payload)
+    findings = scan_uploads(uploads)
+    assert len(findings) == 1
+    assert findings[0].score >= 80
 
 
 def test_silence_is_golden_index_is_not_malware(tmp_path: Path):

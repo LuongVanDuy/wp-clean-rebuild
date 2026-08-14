@@ -7,6 +7,7 @@ from ftplib import error_perm
 from pathlib import Path, PurePosixPath
 from tempfile import TemporaryDirectory
 from typing import Callable
+from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 import hashlib
 import io
@@ -57,6 +58,7 @@ class RebuildExecuteReport:
     themes_uploaded: int = 0
     mu_plugins_uploaded: int = 0
     wp_config_uploaded: bool = False
+    htaccess_uploaded: bool = False
     database_imported: bool = False
     database_statements: int = 0
     temp_bridge_removed: bool = False
@@ -130,6 +132,30 @@ def build_fresh_wp_config(config_path: Path, *, table_prefix: str) -> str:
         ]
     )
     return "\n".join(lines)
+
+
+def build_clean_htaccess(site_url: str) -> str:
+    """Generate only standard WordPress rewrite rules; never restore old .htaccess directives."""
+    parsed = urlsplit(site_url)
+    path = parsed.path.rstrip("/")
+    rewrite_base = f"{path}/" if path else "/"
+    index_target = f"{path}/index.php" if path else "/index.php"
+    return "\n".join(
+        [
+            "# BEGIN WordPress",
+            "<IfModule mod_rewrite.c>",
+            "RewriteEngine On",
+            "RewriteRule .* - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]",
+            f"RewriteBase {rewrite_base}",
+            "RewriteRule ^index\\.php$ - [L]",
+            "RewriteCond %{REQUEST_FILENAME} !-f",
+            "RewriteCond %{REQUEST_FILENAME} !-d",
+            f"RewriteRule . {index_target} [L]",
+            "</IfModule>",
+            "# END WordPress",
+            "",
+        ]
+    )
 
 
 def _download_wordpress_package(progress: ProgressCallback | None = None) -> bytes:
@@ -623,6 +649,7 @@ def execute_rebuild(
 
         config_source = backup_root / "config" / "wp-config.php"
         fresh_config = build_fresh_wp_config(config_source, table_prefix=table_prefix)
+        fresh_htaccess = build_clean_htaccess(profile.web_base_url)
         clean_sql = clean_root / "database" / "clean.sql"
         clean_uploads = clean_root / "uploads"
 
@@ -659,6 +686,15 @@ def execute_rebuild(
         remote_config = str(PurePosixPath(profile.remote_path) / "wp-config.php")
         _upload_text(transport, remote_config, fresh_config)
         report.wp_config_uploaded = True
+        if progress:
+            progress({"phase": "upload_wp_config", "files_completed": 1, "files_total": 1, "current": remote_config})
+        save()
+
+        remote_htaccess = str(PurePosixPath(profile.remote_path) / ".htaccess")
+        _upload_text(transport, remote_htaccess, fresh_htaccess)
+        report.htaccess_uploaded = True
+        if progress:
+            progress({"phase": "upload_htaccess", "files_completed": 1, "files_total": 1, "current": remote_htaccess})
         save()
 
         report.uploads_uploaded = _upload_tree(

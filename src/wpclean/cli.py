@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import platform
 import sys
 from pathlib import Path
@@ -8,12 +9,24 @@ import typer
 from rich.console import Console
 
 from .backup import verify_manifest, write_manifest
+from .remote_backup import backup_wordpress_ftp
 from .scanners import scan_sql as run_sql_scan
 from .scanners import scan_uploads as run_upload_scan
+from .transport import FTPConfig, FTPTransport
 from .ui import show_findings
 
 app = typer.Typer(no_args_is_help=True, help="WordPress clean rebuild and malware triage CLI.")
 console = Console()
+
+
+def _human_bytes(value: float) -> str:
+    units = ["B", "KiB", "MiB", "GiB", "TiB"]
+    size = float(value)
+    for unit in units:
+        if size < 1024 or unit == units[-1]:
+            return f"{size:.2f} {unit}"
+        size /= 1024
+    return f"{size:.2f} TiB"
 
 
 @app.command()
@@ -56,6 +69,91 @@ def verify_backup(path: Path = typer.Argument(..., exists=True, file_okay=False)
         return
     console.print("[red]Backup verification failed.[/red]")
     for problem in problems:
+        console.print(f" - {problem}")
+    raise typer.Exit(code=2)
+
+
+@app.command("ftp-test")
+def ftp_test(
+    host: str = typer.Option(..., "--host"),
+    username: str = typer.Option(..., "--user"),
+    port: int = typer.Option(21, "--port"),
+    tls: bool = typer.Option(True, "--tls/--plain-ftp"),
+    passive: bool = typer.Option(True, "--passive/--active"),
+) -> None:
+    """Test FTP/FTPS credentials without writing to the server."""
+    password = os.getenv("WPCLEAN_FTP_PASSWORD") or typer.prompt("FTP password", hide_input=True)
+    cfg = FTPConfig(
+        host=host,
+        username=username,
+        password=password,
+        port=port,
+        tls=tls,
+        passive=passive,
+        workers=1,
+    )
+    pwd = FTPTransport(cfg).test_connection()
+    mode = "FTPS" if tls else "FTP"
+    console.print(f"[green]{mode} connection OK.[/green] Remote cwd: {pwd}")
+    if not tls:
+        console.print("[yellow]Warning: plain FTP sends credentials without transport encryption.[/yellow]")
+
+
+@app.command("backup-ftp")
+def backup_ftp(
+    host: str = typer.Option(..., "--host"),
+    username: str = typer.Option(..., "--user"),
+    remote_root: str = typer.Option(..., "--remote-root", help="WordPress root, e.g. /public_html"),
+    out: Path = typer.Option(..., "--out", help="Local backup directory"),
+    port: int = typer.Option(21, "--port"),
+    tls: bool = typer.Option(True, "--tls/--plain-ftp"),
+    passive: bool = typer.Option(True, "--passive/--active"),
+    workers: int = typer.Option(6, "--workers", min=1, max=16),
+    block_mb: int = typer.Option(1, "--block-mb", min=1, max=8),
+    resume: bool = typer.Option(True, "--resume/--no-resume"),
+) -> None:
+    """Back up WordPress files over high-throughput FTP/FTPS and verify SHA-256 manifest."""
+    password = os.getenv("WPCLEAN_FTP_PASSWORD") or typer.prompt("FTP password", hide_input=True)
+    if not tls:
+        console.print("[yellow]Warning: plain FTP is unencrypted. Prefer --tls whenever the host supports FTPS.[/yellow]")
+
+    cfg = FTPConfig(
+        host=host,
+        username=username,
+        password=password,
+        port=port,
+        tls=tls,
+        passive=passive,
+        workers=workers,
+        block_size=block_mb * 1024 * 1024,
+    )
+    transport = FTPTransport(cfg)
+    pwd = transport.test_connection()
+    console.print(f"Connected. Remote cwd: {pwd}")
+    console.print(f"Transfer profile: workers={workers}, block={block_mb} MiB, resume={resume}, passive={passive}")
+
+    report = backup_wordpress_ftp(transport, remote_root, out, resume=resume)
+    total_files = sum(item.files_total for item in report.items)
+    downloaded = sum(item.files_downloaded for item in report.items)
+    skipped = sum(item.files_skipped for item in report.items)
+    transferred = sum(item.bytes_downloaded for item in report.items)
+
+    console.print(f"Files discovered: {total_files}")
+    console.print(f"Downloaded: {downloaded}; resumed/already complete: {skipped}")
+    console.print(f"Transferred this run: {_human_bytes(transferred)}")
+    console.print(f"Manifest: {report.manifest_path}")
+
+    missing = [item for item in report.items if item.status != "ok"]
+    for item in missing:
+        console.print(f"[yellow]Skipped {item.remote_path}: {item.error}[/yellow]")
+
+    if report.verified:
+        console.print("[green]Filesystem backup completed and SHA-256 verification passed.[/green]")
+        console.print("[cyan]Database is not exported by FTP. Use the database adapter in the next stage.[/cyan]")
+        return
+
+    console.print("[red]Backup verification failed. Destructive rebuild must remain locked.[/red]")
+    for problem in report.verification_problems:
         console.print(f" - {problem}")
     raise typer.Exit(code=2)
 

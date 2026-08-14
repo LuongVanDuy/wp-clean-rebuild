@@ -9,14 +9,31 @@ function Fail($message) {
     exit 1
 }
 
+function Resolve-UvPath {
+    $cmd = Get-Command uv -ErrorAction SilentlyContinue
+    if ($cmd) { return $cmd.Source }
+
+    $candidates = @(
+        (Join-Path $env:USERPROFILE ".local\bin\uv.exe"),
+        (Join-Path $env:LOCALAPPDATA "Programs\uv\uv.exe"),
+        (Join-Path $env:LOCALAPPDATA "uv\uv.exe")
+    ) | Select-Object -Unique
+
+    foreach ($candidate in $candidates) {
+        if (Test-Path $candidate) { return $candidate }
+    }
+
+    return $null
+}
+
 Write-Host "WP Clean Rebuild - Windows Bootstrap" -ForegroundColor Green
 Write-Host "This setup does NOT require Python to be preinstalled."
 
 $projectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $projectRoot
 
-$uv = Get-Command uv -ErrorAction SilentlyContinue
-if (-not $uv) {
+$uvExe = Resolve-UvPath
+if (-not $uvExe) {
     Write-Host "`nMissing runtime manager: uv" -ForegroundColor Yellow
     Write-Host "Official source: https://astral.sh/uv/install.ps1"
     $answer = Read-Host "Download and install uv now? [Y/n]"
@@ -34,38 +51,27 @@ if (-not $uv) {
         Fail "uv installation failed."
     }
 
-    $candidatePaths = @(
-        (Join-Path $HOME ".local\bin"),
-        (Join-Path $env:USERPROFILE ".local\bin")
-    ) | Select-Object -Unique
-
-    foreach ($candidate in $candidatePaths) {
-        if (Test-Path (Join-Path $candidate "uv.exe")) {
-            $env:Path = "$candidate;$env:Path"
-            break
-        }
-    }
-
-    $uv = Get-Command uv -ErrorAction SilentlyContinue
-    if (-not $uv) {
-        Fail "uv was installed but is not available in the current shell. Close this window, open PowerShell again, and run START.bat."
+    $uvExe = Resolve-UvPath
+    if (-not $uvExe) {
+        Fail "uv was installed but could not be located."
     }
 }
 
-Write-Step "Checking uv"
-& uv --version
+Write-Step "Using uv"
+Write-Host $uvExe
+& $uvExe --version
 if ($LASTEXITCODE -ne 0) { Fail "uv is not working." }
 
 Write-Step "Installing managed Python 3.13"
-& uv python install 3.13
+& $uvExe python install 3.13
 if ($LASTEXITCODE -ne 0) { Fail "Python runtime installation failed." }
 
 Write-Step "Creating project environment and installing dependencies"
-& uv sync
+& $uvExe sync
 if ($LASTEXITCODE -ne 0) { Fail "Project dependency installation failed." }
 
 Write-Step "Running self-check"
-& uv run wpclean doctor
+& $uvExe run wpclean doctor
 if ($LASTEXITCODE -ne 0) { Fail "wpclean self-check failed." }
 
 Write-Host "`nREADY" -ForegroundColor Green

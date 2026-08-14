@@ -6,7 +6,8 @@ from pathlib import Path
 import typer
 
 from .clean_builder import build_clean_restore
-from .cli import app, console
+from .cli import app, console, _profile_transport
+from .rebuild_preflight import run_rebuild_preflight
 from .site_config import load_site_profile
 
 
@@ -62,6 +63,71 @@ def prepare_clean_config(
     console.print("Admin password: [bold]same as FTP password[/bold] (not displayed)")
     console.print(f"Clean manifest: {report.clean_manifest}")
     console.print("[green]Original backup was not modified.[/green]")
+
+
+@app.command("rebuild-preflight")
+def rebuild_preflight(
+    config: Path = typer.Argument(..., exists=True, dir_okay=False),
+    backup_root: Path | None = typer.Argument(
+        None,
+        help="Verified backup root. Defaults to ./backups/<host>.",
+    ),
+) -> None:
+    """Verify backups and produce a non-destructive remote wipe plan."""
+    profile = load_site_profile(config)
+    backup_root = backup_root or Path("backups") / profile.host
+    if not backup_root.exists() or not backup_root.is_dir():
+        raise typer.BadParameter(f"Backup root does not exist: {backup_root}")
+
+    transport, remote_root = _profile_transport(config)
+    report_path = Path("reports") / profile.host / "rebuild-preflight.json"
+
+    console.print(f"Site: {profile.host}")
+    console.print(f"Remote WordPress root: {remote_root}")
+    console.print(f"Original backup: {backup_root}")
+    console.print(f"Clean staging: {backup_root / 'clean'}")
+    console.print("[cyan]This command is read-only on the remote site. Nothing will be deleted or uploaded.[/cyan]")
+
+    try:
+        report = run_rebuild_preflight(
+            host=profile.host,
+            transport=transport,
+            remote_root=remote_root,
+            backup_root=backup_root,
+            report_path=report_path,
+        )
+    except (ValueError, RuntimeError) as exc:
+        console.print(f"[red]Rebuild preflight blocked:[/red] {exc}")
+        raise typer.Exit(code=2) from exc
+
+    console.print("\n[green]✓ Original backup verified[/green]")
+    console.print("[green]✓ Clean staging verified[/green]")
+    console.print(f"Remote files inventoried: {report.remote_files}")
+    console.print(f"Planned wipe: {report.wipe_files}")
+    console.print(f"Preserve: {report.preserve_files}")
+    console.print(f"Blocked/unknown: {report.blocked_files}")
+
+    if report.preserve:
+        console.print("\n[bold]Preserved remote paths:[/bold]")
+        for item in report.preserve[:20]:
+            console.print(f" - [cyan]{item.path}[/cyan]: {item.reason}")
+        if len(report.preserve) > 20:
+            console.print(f" - ... and {len(report.preserve) - 20} more (see report)")
+
+    if report.blocked:
+        console.print("\n[red]DESTRUCTIVE REBUILD REMAINS LOCKED.[/red]")
+        console.print("Unknown, unbacked, or drifted files were found:")
+        for item in report.blocked[:30]:
+            console.print(f" - [red]{item.path}[/red]: {item.reason}")
+        if len(report.blocked) > 30:
+            console.print(f" - ... and {len(report.blocked) - 30} more (see report)")
+        console.print(f"Full report: {report_path}")
+        raise typer.Exit(code=2)
+
+    console.print("\n[bold green]PREFLIGHT PASS — destructive rebuild may be unlocked in the next stage.[/bold green]")
+    console.print(f"Wipe plan report: {report_path}")
+    for warning in report.warnings:
+        console.print(f"[yellow]Warning: {warning}[/yellow]")
 
 
 __all__ = ["app"]

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from pathlib import PurePosixPath
-from typing import Any
 import secrets
 
 from . import gui_fresh_entry as base
@@ -32,7 +31,9 @@ $cfg=json_decode(base64_decode('__CFG__'),true); if(!is_array($cfg)){out(false,'
 mysqli_report(MYSQLI_REPORT_OFF); $db=@new mysqli($cfg['host'],$cfg['user'],$cfg['pass'],$cfg['name']);
 if($db->connect_errno){out(false,'Database login failed: '.$db->connect_error,array(),500);}
 if(!$db->query('SELECT 1')){out(false,'Database query failed: '.$db->error,array(),500);}
-out(true,'database connection ready',array('database'=>$cfg['name']));
+$result=$db->query('SHOW TABLES'); if(!$result){out(false,'Could not inspect database tables: '.$db->error,array(),500);}
+$count=$result->num_rows; if($count>0){out(false,'Database is not empty. Fresh Install requires a new/empty database.',array('tables'=>$count),409);}
+out(true,'database connection ready and empty',array('database'=>$cfg['name'],'tables'=>0));
 '''.replace("__TOKEN__", _php_single_quote(token)).replace("__CFG__", cfg)
 
 
@@ -47,23 +48,37 @@ def _ensure_root(transport, remote_path: str) -> None:
             client.close()
 
 
-def _preflight_database(req: FreshInstallRequest, transport, job) -> None:
-    _ensure_root(transport, req.remote_path)
+def _run_bridge(transport, req: FreshInstallRequest, php: str) -> None:
     token = secrets.token_urlsafe(32)
-    filename = f".wpclean-preflight-{secrets.token_hex(8)}.php"
+    filename = f"wpclean-preflight-{secrets.token_hex(8)}.php"
     remote = str(PurePosixPath(req.remote_path) / filename)
-    if req.db_mode == "create":
-        job.log("Preflight: kiểm tra quyền MySQL và tạo database/user trước destructive boundary", req.secrets)
-        php = _database_create_bridge(req, token)
-    else:
-        job.log("Preflight: kiểm tra database có sẵn trước destructive boundary", req.secrets)
-        php = _database_test_bridge(req, token)
+    # php is built with a placeholder token, so rebuild it at the caller with this token.
+    raise RuntimeError("internal bridge token mismatch")
+
+
+def _upload_and_call(transport, req: FreshInstallRequest, php_factory, label: str) -> None:
+    token = secrets.token_urlsafe(32)
+    filename = f"wpclean-preflight-{secrets.token_hex(8)}.php"
+    remote = str(PurePosixPath(req.remote_path) / filename)
+    php = php_factory(token)
     _upload_text(transport, remote, php)
     try:
         _call_bridge(req.site_url, filename, token)
-        job.log("Preflight database PASS", req.secrets)
     finally:
         _delete_remote_file(transport, remote)
+
+
+def _preflight_database(req: FreshInstallRequest, transport, job) -> None:
+    _ensure_root(transport, req.remote_path)
+    if req.db_mode == "create":
+        job.log("Preflight: kiểm tra quyền MySQL và tạo database/user trước destructive boundary", req.secrets)
+        _upload_and_call(transport, req, lambda token: _database_create_bridge(req, token), "create")
+        job.log("Preflight: xác minh database user mới đăng nhập được và database đang rỗng", req.secrets)
+        _upload_and_call(transport, req, lambda token: _database_test_bridge(req, token), "test")
+    else:
+        job.log("Preflight: kiểm tra database có sẵn trước destructive boundary", req.secrets)
+        _upload_and_call(transport, req, lambda token: _database_test_bridge(req, token), "test")
+    job.log("Preflight database PASS · kết nối được và database rỗng", req.secrets)
 
 
 def _safe_fresh_worker(job, req: FreshInstallRequest) -> None:

@@ -4,9 +4,13 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from ftplib import FTP, FTP_TLS, error_perm
 from pathlib import Path, PurePosixPath
+from typing import Callable
 import os
 import threading
 import time
+
+
+ProgressCallback = Callable[[dict], None]
 
 
 @dataclass(slots=True)
@@ -44,12 +48,7 @@ class TransferStats:
 
 
 class FTPTransport:
-    """High-throughput FTP/FTPS downloader.
-
-    Directory discovery uses one control connection. File transfers use a bounded
-    pool of persistent per-thread connections to avoid reconnecting for every file.
-    Downloads can resume from an existing partial local file via REST.
-    """
+    """High-throughput FTP/FTPS downloader with bounded parallelism and resume support."""
 
     def __init__(self, config: FTPConfig):
         self.config = config
@@ -95,7 +94,6 @@ class FTPTransport:
         except (error_perm, AttributeError):
             pass
 
-        # LIST fallback for old FTP servers. We probe each item conservatively.
         current = client.pwd()
         try:
             client.cwd(remote_dir)
@@ -124,14 +122,24 @@ class FTPTransport:
             except Exception:
                 pass
 
-    def list_files_recursive(self, remote_root: str) -> list[RemoteFile]:
+    def list_files_recursive(self, remote_root: str, progress: ProgressCallback | None = None) -> list[RemoteFile]:
         remote_root = str(PurePosixPath(remote_root))
         client = self._new_client()
         files: list[RemoteFile] = []
         stack = [remote_root]
+        dirs_scanned = 0
         try:
             while stack:
                 current = stack.pop()
+                dirs_scanned += 1
+                if progress:
+                    progress({
+                        "phase": "discover",
+                        "remote_root": remote_root,
+                        "current_dir": current,
+                        "dirs_scanned": dirs_scanned,
+                        "files_found": len(files),
+                    })
                 for name, facts in self._mlsd(client, current):
                     if name in {".", ".."}:
                         continue
@@ -145,6 +153,14 @@ class FTPTransport:
                         raw_size = facts.get("size")
                         size = int(raw_size) if raw_size and raw_size.isdigit() else None
                         files.append(RemoteFile(path=path, size=size))
+            if progress:
+                progress({
+                    "phase": "discovered",
+                    "remote_root": remote_root,
+                    "dirs_scanned": dirs_scanned,
+                    "files_found": len(files),
+                    "bytes_total": sum(item.size or 0 for item in files),
+                })
             return files
         finally:
             try:
@@ -182,7 +198,6 @@ class FTPTransport:
                     rest=offset if offset else None,
                 )
         except Exception:
-            # Drop a potentially broken worker connection. A future task reconnects.
             try:
                 client.close()
             except Exception:
@@ -193,33 +208,73 @@ class FTPTransport:
         final_size = local_path.stat().st_size
         return "downloaded", max(0, final_size - start_size)
 
-    def download_tree(self, remote_root: str, local_root: Path, resume: bool = True) -> TransferStats:
+    def download_tree(
+        self,
+        remote_root: str,
+        local_root: Path,
+        resume: bool = True,
+        progress: ProgressCallback | None = None,
+    ) -> TransferStats:
         local_root.mkdir(parents=True, exist_ok=True)
-        files = self.list_files_recursive(remote_root)
+        files = self.list_files_recursive(remote_root, progress=progress)
         started = time.monotonic()
         downloaded = 0
         skipped = 0
         bytes_downloaded = 0
+        completed = 0
+        total_bytes = sum(item.size or 0 for item in files)
 
         with ThreadPoolExecutor(max_workers=max(1, self.config.workers), thread_name_prefix="ftp") as pool:
-            futures = [
-                pool.submit(self._download_one, item, remote_root, local_root, resume)
+            futures = {
+                pool.submit(self._download_one, item, remote_root, local_root, resume): item
                 for item in files
-            ]
+            }
             for future in as_completed(futures):
+                item = futures[future]
                 status, transferred = future.result()
+                completed += 1
                 bytes_downloaded += transferred
                 if status == "skipped":
                     skipped += 1
                 else:
                     downloaded += 1
 
+                if progress:
+                    elapsed = max(time.monotonic() - started, 0.001)
+                    progress({
+                        "phase": "transfer",
+                        "remote_root": remote_root,
+                        "current_file": item.path,
+                        "files_total": len(files),
+                        "files_completed": completed,
+                        "files_downloaded": downloaded,
+                        "files_skipped": skipped,
+                        "bytes_downloaded": bytes_downloaded,
+                        "bytes_total": total_bytes,
+                        "elapsed_seconds": elapsed,
+                        "bytes_per_second": bytes_downloaded / elapsed,
+                    })
+
+        elapsed = time.monotonic() - started
+        if progress:
+            progress({
+                "phase": "complete",
+                "remote_root": remote_root,
+                "files_total": len(files),
+                "files_downloaded": downloaded,
+                "files_skipped": skipped,
+                "bytes_downloaded": bytes_downloaded,
+                "bytes_total": total_bytes,
+                "elapsed_seconds": elapsed,
+                "bytes_per_second": bytes_downloaded / elapsed if elapsed > 0 else 0.0,
+            })
+
         return TransferStats(
             files_total=len(files),
             files_downloaded=downloaded,
             files_skipped=skipped,
             bytes_downloaded=bytes_downloaded,
-            elapsed_seconds=time.monotonic() - started,
+            elapsed_seconds=elapsed,
         )
 
     def download_file(self, remote_path: str, local_path: Path, resume: bool = True) -> TransferStats:
@@ -237,7 +292,6 @@ class FTPTransport:
                 client.close()
 
         remote = RemoteFile(path=remote_path, size=size)
-        # Use the parent as roots so the same safe relative-path machinery applies.
         remote_root = str(PurePosixPath(remote_path).parent)
         local_root = local_path.parent
         expected_name = PurePosixPath(remote_path).name

@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import json
+import re
 from pathlib import Path
 
 from typer.testing import CliRunner
 
+from wpclean import gui_entry  # noqa: F401 - activates GUI runtime patches
 from wpclean import gui_server
 from wpclean.gui_ui import render_app
 from wpclean.rebuild_entry import app
@@ -27,18 +30,27 @@ def _sandbox_gui(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(gui_server.wizard, "BACKUPS_DIR", backups)
     monkeypatch.setattr(gui_server.wizard, "REPORTS_DIR", reports)
     gui_server.JOBS.clear()
+    gui_server.ACTIVE_PROJECT = None
 
 
 def test_gui_html_is_self_contained_and_vietnamese() -> None:
     html = render_app("test-token")
 
     assert "WP Clean Rebuild" in html
-    assert "Quản lý xử lý WordPress" in html
+    assert "Dự án WordPress" in html
     assert "Tạo dự án mới" in html
     assert "Xác nhận rebuild WordPress" in html
+    assert "Sửa kết nối FTP" in html
+    assert "Lưu & kiểm tra kết nối" in html
     assert "test-token" in html
     assert "https://cdn" not in html
     assert "unpkg.com" not in html
+    assert "linear-gradient" not in html
+    assert "backdrop-filter" not in html
+
+    weights = [int(item) for item in re.findall(r"font-weight:(\d+)", html)]
+    assert weights
+    assert max(weights) <= 700
 
 
 def test_gui_create_project_writes_local_profile(tmp_path: Path, monkeypatch) -> None:
@@ -66,6 +78,73 @@ def test_gui_create_project_writes_local_profile(tmp_path: Path, monkeypatch) ->
     assert project["host"] == "example.test"
     assert project["nextStage"] == "backup-files"
     assert project["completed"] is False
+    assert project["connection"]["username"] == "ftp-user"
+    assert project["connection"]["passwordConfigured"] is True
+    assert "password" not in project["connection"]
+
+
+def test_gui_can_update_ftp_and_keep_password_when_blank(tmp_path: Path, monkeypatch) -> None:
+    _sandbox_gui(tmp_path, monkeypatch)
+    gui_server.create_project(
+        {
+            "name": "edit-me",
+            "host": "example.test",
+            "username": "old-user",
+            "password": "old-pass",
+            "protocol": "ftp",
+            "port": 21,
+            "remotePath": "/public_html",
+            "siteUrl": "https://example.test",
+        }
+    )
+
+    updated = gui_server.create_project(
+        {
+            "_updateProject": "edit-me",
+            "host": "example.test",
+            "username": "new-user",
+            "password": "",
+            "protocol": "ftps",
+            "port": 2121,
+            "remotePath": "/domains/example.test/public_html",
+            "siteUrl": "https://example.test",
+            "workers": 6,
+            "blockMb": 2,
+            "passive": True,
+        }
+    )
+
+    raw = json.loads((tmp_path / "sites" / "edit-me.json").read_text(encoding="utf-8"))
+    assert raw["username"] == "new-user"
+    assert raw["password"] == "old-pass"
+    assert raw["protocol"] == "ftps"
+    assert raw["port"] == 2121
+    assert updated["connection"]["username"] == "new-user"
+    assert updated["connection"]["port"] == 2121
+    assert "password" not in updated["connection"]
+
+
+def test_gui_can_replace_wrong_ftp_password(tmp_path: Path, monkeypatch) -> None:
+    _sandbox_gui(tmp_path, monkeypatch)
+    gui_server.create_project(
+        {
+            "name": "wrong-login",
+            "host": "example.test",
+            "username": "ftp-user",
+            "password": "wrong-pass",
+        }
+    )
+
+    gui_server.create_project(
+        {
+            "_updateProject": "wrong-login",
+            "username": "ftp-user",
+            "password": "correct-pass",
+        }
+    )
+
+    raw = json.loads((tmp_path / "sites" / "wrong-login.json").read_text(encoding="utf-8"))
+    assert raw["password"] == "correct-pass"
 
 
 def test_gui_rejects_duplicate_project(tmp_path: Path, monkeypatch) -> None:

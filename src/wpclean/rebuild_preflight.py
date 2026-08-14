@@ -55,8 +55,10 @@ class RebuildPreflightReport:
     remote_root: str
     backup_root: str
     clean_root: str
+    mode: str = "full"
     original_backup_verified: bool = False
     clean_staging_verified: bool = False
+    remote_root_verified: bool = False
     remote_files: int = 0
     wipe_files: int = 0
     preserve_files: int = 0
@@ -90,7 +92,6 @@ def _classify(remote: RemoteFile, *, remote_root: str, backup_root: Path) -> Pre
     rel = _relative_remote(remote_root, remote.path)
     lowered = rel.lower()
 
-    # Hosting/ACME validation files are deliberately outside the wipe set.
     if lowered == ".well-known" or lowered.startswith(".well-known/"):
         return PreflightFile(rel, remote.size, "preserve", "hosting/ACME validation path")
 
@@ -135,6 +136,7 @@ def run_rebuild_preflight(
     backup_root: Path,
     report_path: Path,
     progress: PreflightProgressCallback | None = None,
+    fast: bool = False,
 ) -> RebuildPreflightReport:
     clean_root = backup_root / "clean"
     original_manifest = backup_root / "manifest.json"
@@ -155,6 +157,43 @@ def run_rebuild_preflight(
     clean_ok, clean_problems = verify_manifest(clean_root, clean_manifest)
     if not clean_ok:
         raise ValueError("Clean staging verification failed: " + "; ".join(clean_problems))
+
+    warnings: list[str] = []
+    if not transport.config.tls:
+        warnings.append("Connection uses plain FTP; credentials and transferred data are not transport-encrypted.")
+
+    if fast:
+        if progress:
+            progress({"phase": "verify_remote_root", "remote_root": remote_root})
+        if not transport.directory_exists(remote_root):
+            raise ValueError(f"Configured remote WordPress root does not exist or is not accessible: {remote_root}")
+
+        warnings.append(
+            "FAST mode intentionally skips the duplicate recursive remote inventory. The execute stage must enumerate once while deleting."
+        )
+        warnings.append(
+            "FAST mode assumes everything inside the configured WordPress root may be wiped except explicitly preserved hosting paths such as .well-known."
+        )
+        warnings.append(
+            "Plugins/themes from the compromised backup are reference evidence only; reinstall trusted copies by default instead of restoring old executable code."
+        )
+        report = RebuildPreflightReport(
+            host=host,
+            remote_root=remote_root,
+            backup_root=str(backup_root),
+            clean_root=str(clean_root),
+            mode="fast",
+            original_backup_verified=True,
+            clean_staging_verified=True,
+            remote_root_verified=True,
+            ready_for_destructive_rebuild=True,
+            warnings=warnings,
+        )
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(json.dumps(asdict(report), indent=2, ensure_ascii=False), encoding="utf-8")
+        if progress:
+            progress({"phase": "complete_fast"})
+        return report
 
     if progress:
         progress({"phase": "inventory_start", "remote_root": remote_root})
@@ -178,19 +217,18 @@ def run_rebuild_preflight(
     preserve = [item for item in classified if item.action == "preserve"]
     wipe = [item for item in classified if item.action == "wipe"]
 
-    warnings: list[str] = []
     if preserve:
         warnings.append("Preserved paths are excluded from destructive wipe and must be reviewed separately if compromise is suspected.")
-    if not transport.config.tls:
-        warnings.append("Connection uses plain FTP; credentials and transferred data are not transport-encrypted.")
 
     report = RebuildPreflightReport(
         host=host,
         remote_root=remote_root,
         backup_root=str(backup_root),
         clean_root=str(clean_root),
+        mode="full",
         original_backup_verified=True,
         clean_staging_verified=True,
+        remote_root_verified=True,
         remote_files=len(classified),
         wipe_files=len(wipe),
         preserve_files=len(preserve),

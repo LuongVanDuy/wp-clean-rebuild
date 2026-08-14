@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from wpclean.fresh_install import FreshInstallRequest, build_wp_config, _database_create_bridge, _wordpress_install_bridge
-from wpclean import gui_fresh_entry  # noqa: F401 - activates full GUI stack
+from wpclean import gui_fresh_safe_entry  # noqa: F401 - activates full GUI + safety stack
 from wpclean.gui_ui import render_app
 
 
@@ -103,6 +103,10 @@ def test_gui_exposes_separate_fresh_install_wizard() -> None:
     assert "freshProgress" in html
 
 
-def test_launcher_points_to_full_fresh_gui_entry() -> None:
-    script = (Path(__file__).resolve().parents[1] / "giaodien.ps1").read_text(encoding="utf-8-sig")
-    assert "python -m wpclean.gui_fresh_entry" in script
+def test_launcher_points_to_safe_fresh_gui_entry() -> None:
+    root = Path(__file__).resolve().parents[1]
+    script = (root / "giaodien.ps1").read_text(encoding="utf-8-sig")
+    assert "python -m wpclean.gui_fresh_safe_entry" in script
+    safety = (root / "src" / "wpclean" / "gui_fresh_safe_entry.py").read_text(encoding="utf-8")
+    assert "Preflight database PASS" in safety
+    assert "trước destructive boundary" in safety

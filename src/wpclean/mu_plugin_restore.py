@@ -215,7 +215,10 @@ def _exclusions_for_component(exclusions: list[str], component: str) -> list[str
     matched: list[str] = []
     for raw in exclusions:
         normalized = "/" + raw.lstrip("/").lower()
-        if normalized == needle_file or needle_dir in normalized:
+        # Backup reports store the complete remote path (for example
+        # /domains/example.com/public_html/wp-content/mu-plugins/foo.php), so a
+        # root MU-plugin file must be matched by suffix rather than exact path.
+        if normalized.endswith(needle_file) or needle_dir in normalized:
             matched.append(raw)
     return matched
 
@@ -310,11 +313,16 @@ def run_mu_plugin_stage(
     stage = scan_mu_plugins(backup_root)
     source = Path(stage.source_path)
 
-    if not source.exists():
+    if not source.exists() or (not stage.completed and not stage.components):
         _persist_report(report_path, stage)
         return stage
 
     remote_base = str(PurePosixPath(profile.remote_path) / "wp-content" / "mu-plugins")
+    upload_failed = False
+    # completed now means both scan and all intended clean-component uploads
+    # finished. Blocked malware components do not make the stage incomplete;
+    # transport failures do, so BATDAU can resume this exact stage later.
+    stage.completed = False
     for component in stage.components:
         component_path = source / component.name
         if component.blocked:
@@ -337,12 +345,14 @@ def run_mu_plugin_stage(
             component.files_uploaded = uploaded
             stage.files_uploaded += uploaded
         except Exception as exc:
+            upload_failed = True
             component.blocked = True
             stage.clean_components = max(0, stage.clean_components - 1)
             stage.blocked_components += 1
             component.unreadable_files.append(f"UPLOAD FAILED: {type(exc).__name__}: {exc}")
             stage.warnings.append(f"Upload MU-plugin component {component.name} thất bại: {type(exc).__name__}: {exc}")
 
+    stage.completed = not upload_failed
     _persist_report(report_path, stage)
     return stage
 

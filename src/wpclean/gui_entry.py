@@ -4,11 +4,48 @@ from pathlib import Path
 from typing import Any
 
 from . import gui_server as server
+from . import gui_ui
 from .theme_restore import existing_child_theme_repair, plan_theme_stage
 
 
 _ORIGINAL_PROJECT_PAYLOAD = server._project_payload
 _ORIGINAL_CREATE_PROJECT = server.create_project
+_ORIGINAL_RENDER_APP = gui_ui.render_app
+
+
+_READABILITY_CSS = r'''<style id="wpclean-readability">
+html,body{font-size:15px}
+.brand strong{font-size:16px}.brand span{font-size:13px}.navbtn{font-size:14px}.side-note{font-size:13px}
+.top-title{font-size:16px}.btn{font-size:14px}.page-head h1{font-size:28px}.page-head p{font-size:14px}
+.summary-item span{font-size:12px}.summary-item b{font-size:21px}.panel-head h2{font-size:16px}.search{font-size:14px}
+.project-header{font-size:12px}.project-name h3{font-size:15px}.project-name p{font-size:13px}.status{font-size:12px}
+.current-step{font-size:13px}.progress-num{font-size:12px}.open-btn{font-size:13px}.empty{font-size:14px}
+.drawer-title h2{font-size:22px}.drawer-title p{font-size:13px}.section-title{font-size:13px}
+.kv span{font-size:12px}.kv b{font-size:13px}.step label{font-size:13px}.step small{font-size:12px}.stepdot{font-size:11px}
+.action-card h3{font-size:15px}.action-card p{font-size:13px}.confirm-input{font-size:14px}
+.check b{font-size:13px}.check span{font-size:12px}.job h3{font-size:14px}.job p{font-size:12px}.jobcur{font-size:12px}
+.errorbox{font-size:12px}.logs div{font-size:11px}.foot-danger p{font-size:12px}
+.modalhead h2{font-size:21px}.modalhead p{font-size:13px}.field label{font-size:12px}.field input,.field select{font-size:14px}
+.hint{font-size:11px}.toast{font-size:13px}
+</style>'''
+
+
+def _render_app(token: str) -> str:
+    html = _ORIGINAL_RENDER_APP(token)
+    # The GUI binds only to 127.0.0.1. The operator explicitly wants the saved
+    # FTP password visible as plain text for easier local project management.
+    html = html.replace('type="password"', 'type="text"')
+    html = html.replace(
+        "${c.passwordConfigured?'Đã lưu':'Chưa có'}",
+        "${esc(c.password||'Chưa có')}",
+    )
+    html = html.replace("qs('#e_password').value='';", "qs('#e_password').value=c.password||'';")
+    html = html.replace(
+        "Đổi tài khoản, mật khẩu, port hoặc remote path. Mật khẩu để trống sẽ giữ nguyên mật khẩu đang lưu.",
+        "Đổi tài khoản, mật khẩu, port hoặc remote path. Mật khẩu FTP được hiển thị trực tiếp vì giao diện chỉ chạy local trên máy này.",
+    )
+    html = html.replace('placeholder="Để trống nếu không đổi"', 'placeholder="Mật khẩu FTP"')
+    return html.replace("</head>", _READABILITY_CSS + "\n</head>", 1)
 
 
 def _project_payload(name: str) -> dict[str, Any]:
@@ -17,6 +54,7 @@ def _project_payload(name: str) -> dict[str, Any]:
     payload["connection"] = {
         "host": profile.host,
         "username": profile.username,
+        "password": profile.password or "",
         "protocol": profile.protocol,
         "port": profile.port,
         "remotePath": profile.remote_path,
@@ -162,6 +200,7 @@ def _delete_project_local(name: str, confirmation: str) -> None:
     server.JOBS.pop(name, None)
 
 
+gui_ui.render_app = _render_app
 server._project_payload = _project_payload
 server.create_project = _create_or_update_project
 server._theme_gate = _theme_gate

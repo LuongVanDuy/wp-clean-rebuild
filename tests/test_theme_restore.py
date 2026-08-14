@@ -129,3 +129,29 @@ def test_flatsome_package_must_be_installable_theme_zip(tmp_path: Path):
     assert (destination / "style.css").is_file()
     assert (destination / "functions.php").is_file()
     assert len(digest) == 64
+
+
+def test_flatsome_package_can_have_extra_top_level_files_and_directories(tmp_path: Path):
+    package = tmp_path / "flatsome-bundle.zip"
+    with zipfile.ZipFile(package, "w") as archive:
+        archive.writestr("documentation/readme.txt", "Theme documentation")
+        archive.writestr("license.txt", "License text")
+        archive.writestr("__MACOSX/._junk", "metadata")
+        archive.writestr(
+            "theme-package/flatsome/style.css",
+            "/*\nTheme Name: Flatsome\nVersion: 9.9\n*/\n",
+        )
+        archive.writestr("theme-package/flatsome/functions.php", "<?php // trusted fixture\n")
+        archive.writestr("theme-package/flatsome/assets/app.css", "body{}")
+
+    destination = tmp_path / "extract"
+    root, digest = _safe_extract_flatsome(package, destination)
+
+    assert root == destination
+    assert (destination / "style.css").is_file()
+    assert (destination / "functions.php").is_file()
+    assert (destination / "assets" / "app.css").is_file()
+    assert not (destination / "documentation").exists()
+    assert not (destination / "license.txt").exists()
+    assert not (destination / "__MACOSX").exists()
+    assert len(digest) == 64

@@ -33,7 +33,7 @@ def _sandbox_gui(tmp_path: Path, monkeypatch) -> None:
     gui_server.ACTIVE_PROJECT = None
 
 
-def test_gui_html_is_self_contained_and_vietnamese() -> None:
+def test_gui_html_is_self_contained_vietnamese_and_readable() -> None:
     html = render_app("test-token")
 
     assert "WP Clean Rebuild" in html
@@ -42,6 +42,10 @@ def test_gui_html_is_self_contained_and_vietnamese() -> None:
     assert "Xác nhận rebuild WordPress" in html
     assert "Sửa kết nối FTP" in html
     assert "Lưu & kiểm tra kết nối" in html
+    assert "wpclean-readability" in html
+    assert "page-head h1{font-size:28px}" in html
+    assert "field input,.field select{font-size:14px}" in html
+    assert 'type="password"' not in html
     assert "test-token" in html
     assert "https://cdn" not in html
     assert "unpkg.com" not in html
@@ -80,7 +84,7 @@ def test_gui_create_project_writes_local_profile(tmp_path: Path, monkeypatch) ->
     assert project["completed"] is False
     assert project["connection"]["username"] == "ftp-user"
     assert project["connection"]["passwordConfigured"] is True
-    assert "password" not in project["connection"]
+    assert project["connection"]["password"] == "ftp-pass"
 
 
 def test_gui_can_update_ftp_and_keep_password_when_blank(tmp_path: Path, monkeypatch) -> None:
@@ -121,7 +125,7 @@ def test_gui_can_update_ftp_and_keep_password_when_blank(tmp_path: Path, monkeyp
     assert raw["port"] == 2121
     assert updated["connection"]["username"] == "new-user"
     assert updated["connection"]["port"] == 2121
-    assert "password" not in updated["connection"]
+    assert updated["connection"]["password"] == "old-pass"
 
 
 def test_gui_can_replace_wrong_ftp_password(tmp_path: Path, monkeypatch) -> None:
@@ -135,7 +139,7 @@ def test_gui_can_replace_wrong_ftp_password(tmp_path: Path, monkeypatch) -> None
         }
     )
 
-    gui_server.create_project(
+    updated = gui_server.create_project(
         {
             "_updateProject": "wrong-login",
             "username": "ftp-user",
@@ -145,6 +149,7 @@ def test_gui_can_replace_wrong_ftp_password(tmp_path: Path, monkeypatch) -> None
 
     raw = json.loads((tmp_path / "sites" / "wrong-login.json").read_text(encoding="utf-8"))
     assert raw["password"] == "correct-pass"
+    assert updated["connection"]["password"] == "correct-pass"
 
 
 def test_gui_rejects_duplicate_project(tmp_path: Path, monkeypatch) -> None:

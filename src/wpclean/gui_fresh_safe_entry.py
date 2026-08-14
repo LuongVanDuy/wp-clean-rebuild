@@ -12,6 +12,8 @@ from .rebuild_execute import _delete_remote_file, _ensure_remote_dir, _php_singl
 
 
 _ORIGINAL_RUN_FRESH_INSTALL = base.run_fresh_install
+_ORIGINAL_START_FRESH = base.start_fresh_install
+_ORIGINAL_START_CLEAN = server.start_job
 
 
 def _database_test_bridge(req: FreshInstallRequest, token: str) -> str:
@@ -61,8 +63,21 @@ def _upload_and_call(transport, req: FreshInstallRequest, php_factory) -> None:
         _delete_remote_file(transport, remote)
 
 
-def _preflight_database(req: FreshInstallRequest, transport, job) -> None:
+def _preflight_remote(req: FreshInstallRequest, transport, job) -> None:
     _ensure_root(transport, req.remote_path)
+    entries = fresh_module._remote_entries(transport, req.remote_path)
+    if entries and not req.wipe_existing:
+        raise RuntimeError(
+            "Thư mục đích không rỗng. Fresh Install chưa tạo database và chưa xóa dữ liệu. "
+            "Nếu đây đúng là hosting cần cài mới hoàn toàn, bật 'Xóa dữ liệu hiện có' và nhập lại domain."
+        )
+    if entries:
+        job.log(f"Preflight remote: phát hiện {len(entries)} mục; đã có xác nhận xóa theo domain", req.secrets)
+    else:
+        job.log("Preflight remote PASS · thư mục đích đang rỗng", req.secrets)
+
+
+def _preflight_database(req: FreshInstallRequest, transport, job) -> None:
     if req.db_mode == "create":
         job.log("Preflight: kiểm tra quyền MySQL và tạo database/user trước destructive boundary", req.secrets)
         _upload_and_call(transport, req, lambda token: _database_create_bridge(req, token))
@@ -114,9 +129,10 @@ def _safe_fresh_worker(job, req: FreshInstallRequest) -> None:
     report_dir = server.REPORTS_DIR / req.site_host
     try:
         transport = server.wizard._transport(req.profile, req.ftp_password)
-        job.message = "Đang preflight FTP / database trước khi thay đổi hosting"
+        job.message = "Đang preflight FTP / remote path / database trước khi thay đổi hosting"
         job.percent = 2
         transport.test_connection()
+        _preflight_remote(req, transport, job)
         _preflight_database(req, transport, job)
 
         job.log("Bắt đầu cài WordPress mới", req.secrets)
@@ -148,9 +164,25 @@ def _safe_fresh_worker(job, req: FreshInstallRequest) -> None:
         job.log(traceback.format_exc(limit=4), req.secrets)
 
 
+def _start_fresh_serialized(data):
+    if server.ACTIVE_PROJECT:
+        raise RuntimeError(
+            f"Đang chạy Clean/Rebuild cho dự án {server.ACTIVE_PROJECT}. Hãy chờ hoàn tất trước khi Fresh Install."
+        )
+    return _ORIGINAL_START_FRESH(data)
+
+
+def _start_clean_serialized(name, options):
+    if any(job.status == "running" for job in base.FRESH_JOBS.values()):
+        raise RuntimeError("Đang chạy Fresh Install. Hãy chờ cài WordPress mới hoàn tất trước khi chạy Clean/Rebuild.")
+    return _ORIGINAL_START_CLEAN(name, options)
+
+
 # Keep Fresh Install a genuinely separate feature. It persists its own report/history,
 # but it does not create a normal Clean/Rebuild project after installation.
 base._fresh_worker = _safe_fresh_worker
+base.start_fresh_install = _start_fresh_serialized
+server.start_job = _start_clean_serialized
 
 
 def main() -> None:

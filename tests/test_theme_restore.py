@@ -80,7 +80,7 @@ def test_clean_flatsome_child_passes_static_gate(tmp_path: Path):
     assert not [finding for finding in report.findings if finding.score >= 60]
 
 
-def test_obfuscated_child_theme_is_blocked(tmp_path: Path):
+def test_obfuscated_child_theme_is_blocked(tmp_path: Path, synthetic_code_samples):
     child = tmp_path / "flatsome-child"
     child.mkdir()
     (child / "style.css").write_text(
@@ -88,7 +88,7 @@ def test_obfuscated_child_theme_is_blocked(tmp_path: Path):
         encoding="utf-8",
     )
     (child / "functions.php").write_text(
-        "<?php eval(gzinflate(base64_decode($_POST['payload'])));",
+        str(synthetic_code_samples["theme_obfuscated_php"]),
         encoding="utf-8",
     )
 

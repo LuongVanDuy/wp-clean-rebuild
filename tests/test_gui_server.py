@@ -45,6 +45,8 @@ def test_gui_html_is_self_contained_vietnamese_and_readable() -> None:
     assert "Lưu & kiểm tra kết nối" in html
     assert "wpclean-readability" in html
     assert "html,body{font-size:16px" in html
+    assert ".layout{display:block!important}" in html
+    assert ".sidebar{display:none!important}" in html
     assert "page-head h1{font-size:32px}" in html
     assert "project-name h3{font-size:17px}" in html
     assert "field input,.field select{font-size:16px}" in html
@@ -62,6 +64,19 @@ def test_gui_html_is_self_contained_vietnamese_and_readable() -> None:
     weights = [int(item) for item in re.findall(r"font-weight:(\d+)", html)]
     assert weights
     assert max(weights) <= 700
+
+
+def test_windows_one_click_launcher_is_committed() -> None:
+    root = Path(__file__).resolve().parents[1]
+    launcher = root / "WP-Clean-Rebuild.exe"
+    source = root / "launcher" / "WPCleanLauncher.cs"
+
+    assert launcher.is_file()
+    assert launcher.stat().st_size > 1024
+    assert source.is_file()
+    source_text = source.read_text(encoding="utf-8")
+    assert "giaodien.ps1" in source_text
+    assert "powershell.exe" in source_text
 
 
 def test_gui_terminal_stream_captures_stdout_and_keeps_history() -> None:

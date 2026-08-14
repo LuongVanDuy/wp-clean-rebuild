@@ -1,0 +1,54 @@
+name: build-windows-launcher
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "launcher/WPCleanLauncher.cs"
+      - ".github/workflows/build-launcher.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build WP-Clean-Rebuild.exe
+        shell: powershell
+        run: |
+          $candidates = @(
+            "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\csc.exe",
+            "$env:WINDIR\Microsoft.NET\Framework\v4.0.30319\csc.exe"
+          )
+          $csc = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $csc) { throw "Không tìm thấy csc.exe trên Windows runner." }
+          & $csc /nologo /target:winexe /optimize+ /reference:System.Windows.Forms.dll /out:WP-Clean-Rebuild.exe launcher\WPCleanLauncher.cs
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path "WP-Clean-Rebuild.exe")) {
+            throw "Build launcher thất bại."
+          }
+          Get-Item WP-Clean-Rebuild.exe | Format-List Name,Length,LastWriteTime
+
+      - name: Upload launcher artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: WP-Clean-Rebuild-Windows
+          path: WP-Clean-Rebuild.exe
+          if-no-files-found: error
+
+      - name: Commit launcher into main
+        shell: powershell
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add WP-Clean-Rebuild.exe
+          if (git diff --cached --quiet) {
+            Write-Host "Launcher binary không thay đổi."
+            exit 0
+          }
+          git commit -m "Build WP-Clean-Rebuild.exe [skip ci]"
+          git push origin HEAD:main

@@ -155,15 +155,16 @@ def test_php_under_uploads_blocks(tmp_path: Path, monkeypatch):
     assert any(issue.category == "uploads-executable" for issue in report.issues)
 
 
-def test_known_vivid_marker_blocks(tmp_path: Path, monkeypatch):
+def test_known_vivid_marker_blocks(tmp_path: Path, monkeypatch, synthetic_code_samples):
     files = [RemoteFile("/public_html/wp-content/themes/duyanhweb/functions.php", 50)]
     transport = FakeTransport(files)
     monkeypatch.setattr("wpclean.live_verify._fetch_core_checksums", lambda version: {})
+    marker_payload = str(synthetic_code_samples["live_vivid_path_php"]).encode("utf-8")
     monkeypatch.setattr(
         "wpclean.live_verify._download_scan_file",
         lambda transport, remote_root, item, temp_root: (
             "wp-content/themes/duyanhweb/functions.php",
-            b"<?php $path = '/wp-content/mu-plugins/vivid-toolkit-tap.php';",
+            marker_payload,
         ),
     )
     monkeypatch.setattr(

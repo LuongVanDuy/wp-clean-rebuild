@@ -6,18 +6,18 @@ from wpclean.scanners.sql import scan_sql
 from wpclean.scanners.uploads import scan_uploads
 
 
-def test_sql_compound_payload_is_flagged(tmp_path: Path):
+def test_sql_compound_payload_is_flagged(tmp_path: Path, synthetic_code_samples):
     sql = tmp_path / "db.sql"
-    sql.write_text("INSERT INTO wp_options VALUES (1,'x','eval(base64_decode(\"abc\"))','yes');\n", encoding="utf-8")
+    sql.write_text(str(synthetic_code_samples["sql_compound"]), encoding="utf-8")
     findings = scan_sql(sql)
     assert len(findings) == 1
     assert findings[0].score >= 55
 
 
-def test_php_hidden_as_image_is_critical(tmp_path: Path):
+def test_php_hidden_as_image_is_critical(tmp_path: Path, synthetic_code_samples):
     uploads = tmp_path / "uploads"
     uploads.mkdir()
-    payload = b"\xff\xd8\xfffake-image" + b"<?php echo base64_decode($_POST['x']); ?>" + b"A" * 600
+    payload = bytes(synthetic_code_samples["image_polyglot"])
     (uploads / "photo.jpg").write_bytes(payload)
     findings = scan_uploads(uploads)
     assert findings
@@ -45,10 +45,10 @@ def test_random_short_echo_bytes_in_binary_media_do_not_flag(tmp_path: Path):
     assert findings == []
 
 
-def test_textual_short_echo_payload_in_media_is_flagged(tmp_path: Path):
+def test_textual_short_echo_payload_in_media_is_flagged(tmp_path: Path, synthetic_code_samples):
     uploads = tmp_path / "uploads"
     uploads.mkdir()
-    payload = b"RIFFxxxxWEBP" + b"A" * 128 + b"<?= $_GET['cmd']; ?>" + b" " * 600
+    payload = bytes(synthetic_code_samples["short_echo_polyglot"])
     (uploads / "polyglot.webp").write_bytes(payload)
     findings = scan_uploads(uploads)
     assert len(findings) == 1
@@ -81,22 +81,11 @@ def test_zip_is_preserved_in_backup_but_dropped_from_clean_restore(tmp_path: Pat
     assert archive_path.exists()
 
 
-def test_zip_with_obfuscated_persistent_php_is_critical(tmp_path: Path):
+def test_zip_with_obfuscated_persistent_php_is_critical(tmp_path: Path, synthetic_code_samples):
     uploads = tmp_path / "uploads"
     uploads.mkdir()
     archive_path = uploads / "malware.zip"
-    malicious = b"""<?php
-function abcdefghijklmnop($x){ return gzinflate(base64_decode($x)); }
-function qwertyuiopasdfgh(){ wp_schedule_event(time()+300, 'hourly', 'x'); }
-function zxcvbnmasdfghjkl(){ $u='bad'; if (username_exists($u)) { wp_set_password('x', username_exists($u)); } }
-function poiuytrewqlkjhgf($p,$d){ file_put_contents($p,$d); chmod($p,0644); opcache_invalidate($p,true); }
-function mnbvcxzlkjhgfds(){ return 1; }
-function asdfghjklqwertyu(){ return 2; }
-function qazwsxedcrfvtgby(){ return 3; }
-function plmoknijbuhvygct(){ return 4; }
-function lkjhgfdsaqwertyu(){ return 5; }
-function ytrewqasdfghjklz(){ return 6; }
-"""
+    malicious = str(synthetic_code_samples["archive_obfuscated_php"]).encode("utf-8")
     with zipfile.ZipFile(archive_path, "w") as archive:
         archive.writestr("payload/payload.php", malicious)
 

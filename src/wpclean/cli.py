@@ -57,6 +57,32 @@ def _profile_transport(config_path: Path) -> tuple[FTPTransport, str]:
     return FTPTransport(cfg), profile.remote_path
 
 
+def _read_backup_report(backup_root: Path) -> dict:
+    report_path = backup_root / "backup-report.json"
+    if not report_path.is_file():
+        return {}
+    try:
+        return json.loads(report_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _report_exclusions(backup_root: Path) -> list[dict]:
+    raw = _read_backup_report(backup_root)
+    exclusions = raw.get("exclusions", [])
+    return exclusions if isinstance(exclusions, list) else []
+
+
+def _print_exclusions(exclusions: list[dict]) -> None:
+    if not exclusions:
+        return
+    console.print(f"[yellow]Warning: {len(exclusions)} unreadable file(s) were explicitly EXCLUDED from verification and restore:[/yellow]")
+    for item in exclusions[:20]:
+        console.print(f" - [yellow]EXCLUDED[/yellow] {item.get('path')}: {item.get('error')}")
+    if len(exclusions) > 20:
+        console.print(f" - ... and {len(exclusions) - 20} more (see backup-report.json)")
+
+
 def _run_backup_with_progress(transport: FTPTransport, remote_root: str, out: Path, resume: bool):
     current_stage = {"name": "starting"}
 
@@ -92,17 +118,40 @@ def _run_backup_with_progress(transport: FTPTransport, remote_root: str, out: Pa
                 total_bytes = event.get("bytes_total", 0)
                 progress_ui.update(task_id, description=f"[{stage}] downloading", total=max(total_files, 1), completed=0, files=f"0/{total_files} files", bytes=f"0 B / {_human_bytes(total_bytes)}" if total_bytes else "")
                 return
+            if phase == "retry":
+                current = str(event.get("current_file", ""))
+                if len(current) > 56:
+                    current = "…" + current[-55:]
+                progress_ui.update(
+                    task_id,
+                    description=f"[{stage}] retry {event.get('attempt')}/{event.get('max_attempts')} {current}",
+                    files="",
+                    bytes=f"resume {_human_bytes(event.get('resume_offset', 0))}",
+                )
+                return
+            if phase == "file_failed":
+                current = str(event.get("current_file", ""))
+                if len(current) > 62:
+                    current = "…" + current[-61:]
+                progress_ui.update(task_id, description=f"[{stage}] EXCLUDED unreadable file: {current}", files="", bytes="")
+                return
             if phase == "transfer":
                 total_files = event.get("files_total", 0)
                 completed = event.get("files_completed", 0)
                 transferred = event.get("bytes_downloaded", 0)
                 total_bytes = event.get("bytes_total", 0)
-                progress_ui.update(task_id, description=f"[{stage}] downloading", total=max(total_files, 1), completed=completed, files=f"{completed}/{total_files} files", bytes=f"{_human_bytes(transferred)} / {_human_bytes(total_bytes)}" if total_bytes else _human_bytes(transferred))
+                failed = event.get("files_failed", 0)
+                files_text = f"{completed}/{total_files} files"
+                if failed:
+                    files_text += f" | excluded {failed}"
+                progress_ui.update(task_id, description=f"[{stage}] downloading", total=max(total_files, 1), completed=completed, files=files_text, bytes=f"{_human_bytes(transferred)} / {_human_bytes(total_bytes)}" if total_bytes else _human_bytes(transferred))
                 return
             if phase == "complete":
                 total_files = event.get("files_total", 0)
                 transferred = event.get("bytes_downloaded", 0)
-                progress_ui.update(task_id, description=f"[{stage}] complete", total=max(total_files, 1), completed=max(total_files, 1), files=f"{total_files}/{total_files} files", bytes=_human_bytes(transferred))
+                failed = event.get("files_failed", 0)
+                suffix = f" | excluded {failed}" if failed else ""
+                progress_ui.update(task_id, description=f"[{stage}] complete{suffix}", total=max(total_files, 1), completed=max(total_files, 1), files=f"{total_files}/{total_files} files", bytes=_human_bytes(transferred))
                 return
             if phase == "stage_skipped":
                 progress_ui.update(task_id, description=f"[{stage}] skipped", total=1, completed=1, files="", bytes="")
@@ -117,7 +166,12 @@ def _run_backup_with_progress(transport: FTPTransport, remote_root: str, out: Pa
                 return
             if phase == "verified":
                 ok = event.get("verified", False)
-                progress_ui.update(task_id, description="[manifest] verification passed" if ok else "[manifest] verification failed", total=1, completed=1, files="", bytes="")
+                exclusions = int(event.get("exclusions", 0) or 0)
+                if ok and exclusions:
+                    description = f"[manifest] verification passed with {exclusions} exclusion(s)"
+                else:
+                    description = "[manifest] verification passed" if ok else "[manifest] verification failed"
+                progress_ui.update(task_id, description=description, total=1, completed=1, files="", bytes="")
 
         return backup_wordpress_ftp(transport, remote_root, out, resume=resume, progress=on_progress)
 
@@ -191,7 +245,12 @@ def scan_backup(
     if manifest.exists():
         ok, problems = verify_manifest(backup_root, manifest)
         if ok:
-            console.print("[green]Backup manifest verification passed.[/green]")
+            exclusions = _report_exclusions(backup_root)
+            if exclusions:
+                console.print(f"[green]Backup manifest verification passed with {len(exclusions)} explicit exclusion(s).[/green]")
+                _print_exclusions(exclusions)
+            else:
+                console.print("[green]Backup manifest verification passed.[/green]")
         else:
             console.print("[red]Backup manifest verification failed; scan aborted.[/red]")
             for problem in problems:
@@ -200,17 +259,17 @@ def scan_backup(
     else:
         console.print("[yellow]No manifest.json found; continuing in audit mode.[/yellow]")
 
-    report_path = backup_root / "backup-report.json"
-    if report_path.exists():
-        try:
-            report = json.loads(report_path.read_text(encoding="utf-8"))
-            missing = [item for item in report.get("items", []) if item.get("status") != "ok"]
-            if missing:
-                console.print("[yellow]Backup report contains skipped/missing items:[/yellow]")
-                for item in missing:
-                    console.print(f" - {item.get('remote_path')}: {item.get('error') or item.get('status')}")
-        except Exception as exc:
-            console.print(f"[yellow]Could not parse backup-report.json: {exc}[/yellow]")
+    report = _read_backup_report(backup_root)
+    if report:
+        blocking = [
+            item for item in report.get("items", [])
+            if item.get("status") not in {"ok", "ok-with-exclusions"}
+            and not str(item.get("remote_path", "")).endswith(("/wp-content/mu-plugins", "/php.ini", "/.user.ini", "/robots.txt"))
+        ]
+        if blocking:
+            console.print("[yellow]Backup report contains blocking/missing stages:[/yellow]")
+            for item in blocking:
+                console.print(f" - {item.get('remote_path')}: {item.get('error') or item.get('status')}")
 
     sql_path = backup_root / "database" / "original.sql"
     if sql_path.exists():
@@ -265,19 +324,19 @@ def backup_status(
         else:
             console.print(f"[red]✗[/red] {name}: missing ({path})")
 
-    report_path = backup_root / "backup-report.json"
-    if report_path.exists():
-        try:
-            report = json.loads(report_path.read_text(encoding="utf-8"))
-            console.print("\n[bold]Filesystem backup report:[/bold]")
-            for item in report.get("items", []):
-                status = item.get("status", "unknown")
-                icon = "[green]✓[/green]" if status == "ok" else "[yellow]![/yellow]"
-                console.print(f"{icon} {item.get('remote_path')} -> {item.get('local_path')} | {status}")
-                if item.get("error"):
-                    console.print(f"    {item.get('error')}")
-        except Exception as exc:
-            console.print(f"[yellow]Could not parse backup-report.json: {exc}[/yellow]")
+    report = _read_backup_report(backup_root)
+    if report:
+        console.print("\n[bold]Filesystem backup report:[/bold]")
+        for item in report.get("items", []):
+            status = item.get("status", "unknown")
+            if status == "ok":
+                icon = "[green]✓[/green]"
+            elif status == "ok-with-exclusions":
+                icon = "[yellow]⚠[/yellow]"
+            else:
+                icon = "[red]✗[/red]"
+            console.print(f"{icon} {item.get('remote_path')} -> {item.get('local_path')} | {status}")
+        _print_exclusions(_report_exclusions(backup_root))
 
 
 @app.command("manifest")
@@ -290,7 +349,12 @@ def manifest(path: Path = typer.Argument(..., exists=True, file_okay=False)) -> 
 def verify_backup(path: Path = typer.Argument(..., exists=True, file_okay=False)) -> None:
     ok, problems = verify_manifest(path)
     if ok:
-        console.print("[green]Backup verification passed.[/green]")
+        exclusions = _report_exclusions(path)
+        if exclusions:
+            console.print(f"[green]Backup verification passed with {len(exclusions)} explicit exclusion(s).[/green]")
+            _print_exclusions(exclusions)
+        else:
+            console.print("[green]Backup verification passed.[/green]")
         return
     console.print("[red]Backup verification failed.[/red]")
     for problem in problems:
@@ -399,7 +463,12 @@ def db_backup_config(
         manifest_path = write_manifest(backup_root)
         ok, problems = verify_manifest(backup_root, manifest_path)
         if ok:
-            console.print(f"[green]Full backup manifest regenerated and verification passed:[/green] {manifest_path}")
+            exclusions = _report_exclusions(backup_root)
+            if exclusions:
+                console.print(f"[green]Full recovery set verification passed with {len(exclusions)} explicit exclusion(s):[/green] {manifest_path}")
+                _print_exclusions(exclusions)
+            else:
+                console.print(f"[green]Full backup manifest regenerated and verification passed:[/green] {manifest_path}")
         else:
             console.print("[red]Backup manifest verification failed after database export.[/red]")
             for problem in problems:
@@ -416,13 +485,22 @@ def _print_backup_report(report) -> None:
     console.print(f"Downloaded: {downloaded}; resumed/already complete: {skipped}")
     console.print(f"Transferred this run: {_human_bytes(transferred)}")
     console.print(f"Manifest: {report.manifest_path}")
-    missing = [item for item in report.items if item.status != "ok"]
-    for item in missing:
+
+    _print_exclusions(report.exclusions)
+
+    blocking = [item for item in report.items if item.status not in {"ok", "ok-with-exclusions"}]
+    for item in blocking:
         console.print(f"[yellow]Skipped {item.remote_path}: {item.error}[/yellow]")
+
     if report.verified:
-        console.print("[green]Filesystem backup completed and SHA-256 verification passed.[/green]")
+        if report.verified_with_exclusions:
+            console.print(f"[green]Filesystem backup verification passed with {len(report.exclusions)} explicit exclusion(s).[/green]")
+            console.print("[cyan]Excluded files are recorded in backup-report.json and will not be restored.[/cyan]")
+        else:
+            console.print("[green]Filesystem backup completed and SHA-256 verification passed.[/green]")
         console.print("[cyan]Database is not exported by FTP. Run db-backup-config for the database stage.[/cyan]")
         return
+
     console.print("[red]Backup verification failed. Destructive rebuild must remain locked.[/red]")
     for problem in report.verification_problems:
         console.print(f" - {problem}")

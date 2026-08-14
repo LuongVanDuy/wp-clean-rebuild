@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from wpclean.operator_wizard import _infer_status, _next_stage, _slug
+from wpclean.operator_entry import _next_stage
+from wpclean.operator_wizard import _infer_status, _slug
 
 
 def _paths(tmp_path: Path) -> dict[str, Path]:

@@ -87,6 +87,27 @@ class FTPTransport:
             except Exception:
                 client.close()
 
+    def directory_exists(self, remote_path: str) -> bool:
+        """Verify one configured remote directory without recursively listing it."""
+        client = self._new_client()
+        current = None
+        try:
+            current = client.pwd()
+            client.cwd(str(PurePosixPath(remote_path)))
+            return True
+        except error_perm:
+            return False
+        finally:
+            if current is not None:
+                try:
+                    client.cwd(current)
+                except Exception:
+                    pass
+            try:
+                client.quit()
+            except Exception:
+                client.close()
+
     def _mlsd(self, client: FTP, remote_dir: str):
         try:
             yield from client.mlsd(remote_dir, facts=["type", "size"])

@@ -124,16 +124,30 @@ def _run_theme_stage(
 
     result.child_theme_detected = True
     result.child_theme_slug = active.stylesheet
-    console.print(f"\n[yellow]Website cần theme con: {active.stylesheet}[/yellow]")
-    console.print("Đang quét lại toàn bộ theme con từ immutable backup trước khi cho phép restore...")
+    result.child_prompted = True
+    console.print(f"\n[yellow]Website đang sử dụng theme con: {active.stylesheet}[/yellow]")
+    install_child = typer.confirm(
+        f"Bạn có muốn cài lại theme con {active.stylesheet} từ backup không?",
+        default=False,
+    )
+    if not install_child:
+        result.warnings.append(f"User declined child theme restore: {active.stylesheet}")
+        console.print("[yellow]Đã bỏ qua theme con. Không thực hiện scan hoặc upload theme con.[/yellow]")
+        _save_theme_stage(report_path, result)
+        return result
 
+    console.print("Đang quét toàn bộ theme con trước khi cho phép upload...")
     assert child_root is not None
-    child_scan = scan_child_theme(child_root, slug=active.stylesheet)
+    child_scan = scan_child_theme(
+        child_root,
+        slug=active.stylesheet,
+        backup_root=backup_root,
+    )
     result.child_scan = child_scan.to_dict()
     console.print(f"Child-theme files scanned: {child_scan.files_scanned}")
 
     if child_scan.unreadable_files:
-        console.print("[red]Child theme scan BLOCKED: có file không đọc được.[/red]")
+        console.print("[red]Child theme scan BLOCKED: có file không đọc được hoặc từng bị loại khỏi backup.[/red]")
         for path in child_scan.unreadable_files[:20]:
             console.print(f" - [red]{path}[/red]")
 
@@ -149,26 +163,17 @@ def _run_theme_stage(
 
     if child_scan.blocked:
         result.warnings.append("Child theme restore blocked by static malware/unreadable-file gate.")
+        console.print("[bold red]KHÔNG UPLOAD THEME CON.[/bold red]")
         console.print(
-            "[bold red]KHÔNG CÀI THEME CON.[/bold red] Static scan có HIGH/CRITICAL indicator "
-            "hoặc file không đọc được. Theme con vẫn chỉ nằm trong backup evidence."
+            "[bold yellow]Vui lòng liên hệ kỹ thuật kiểm tra lại theme trước khi upload.[/bold yellow]"
         )
         _save_theme_stage(report_path, result)
         return result
 
     console.print(
-        "[green]✓ Child theme scan PASS: không phát hiện HIGH/CRITICAL malware indicator và không có file unreadable.[/green]"
+        "[green]✓ Theme con scan PASS: không phát hiện HIGH/CRITICAL malware indicator và không có file unreadable.[/green]"
     )
-    result.child_prompted = True
-    install_child = typer.confirm(
-        f"Xác nhận cài lại theme con {active.stylesheet} từ backup đã scan?",
-        default=False,
-    )
-    if not install_child:
-        result.warnings.append(f"User declined child theme restore: {active.stylesheet}")
-        console.print("[yellow]Đã bỏ qua cài theme con theo lựa chọn của bạn.[/yellow]")
-        _save_theme_stage(report_path, result)
-        return result
+    console.print("[cyan]Theme con đã được xác nhận từ trước; bắt đầu upload tự động.[/cyan]")
 
     with console.status(f"[cyan]Uploading child theme {active.stylesheet}...[/cyan]", spinner="dots") as status:
         def child_progress(event: dict) -> None:
@@ -239,7 +244,7 @@ def rebuild_config(
             console.print("  6. Do not restore compromised-backup plugins/themes")
         console.print("  7. Import clean/database/clean.sql through a temporary authenticated bridge with detailed diagnostics")
         console.print("  8. Remove temporary import bridge/data and write execution report")
-        console.print("  9. Detect active theme from clean DB; offer trusted Flatsome + scanned Flatsome child restore")
+        console.print("  9. Detect active theme; offer trusted Flatsome, then ask before scanning/restoring Flatsome child theme")
         console.print("\nTo execute, rerun with [bold]--execute[/bold].")
         return
 

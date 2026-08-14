@@ -105,11 +105,12 @@ def test_accepting_clean_child_scans_then_uploads_without_second_prompt(tmp_path
     assert result.child_files_uploaded == 2
 
 
-def test_accepting_suspicious_child_blocks_upload_and_requests_technical_review(
+def test_accepting_suspicious_child_blocks_upload_and_creates_repair_workspace(
     tmp_path: Path,
     monkeypatch,
     capsys,
 ):
+    monkeypatch.chdir(tmp_path)
     backup_root = tmp_path / "backup"
     _write_flatsome_child_sql(backup_root)
     child_root = backup_root / "themes" / "duyanhweb"
@@ -143,4 +144,8 @@ def test_accepting_suspicious_child_blocks_upload_and_requests_technical_review(
     assert result.child_installed is False
     assert result.child_scan is not None
     assert result.child_scan["blocked"] is True
-    assert "Vui lòng liên hệ kỹ thuật kiểm tra lại theme trước khi upload" in output
+    assert result.child_repair_workspace == "repairs/backup/themes/duyanhweb/working-copy"
+    assert Path(result.child_repair_workspace).is_dir()
+    assert "Theme cần sửa:" in output
+    assert "Danh sách file nghi vấn:" in output
+    assert "Backup gốc giữ nguyên:" in output

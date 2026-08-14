@@ -8,6 +8,7 @@ dependencies = [
   "rich>=13.7",
   "paramiko>=3.4",
   "PyYAML>=6.0",
+  "bcrypt>=4.2",
 ]
 
 [project.scripts]

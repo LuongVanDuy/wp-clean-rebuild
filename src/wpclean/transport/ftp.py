@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from ftplib import FTP, FTP_TLS, error_perm, error_temp
 from pathlib import Path, PurePosixPath
 from typing import Callable
@@ -34,12 +34,20 @@ class RemoteFile:
 
 
 @dataclass(slots=True)
+class TransferFailure:
+    path: str
+    error: str
+
+
+@dataclass(slots=True)
 class TransferStats:
     files_total: int
     files_downloaded: int
     files_skipped: int
     bytes_downloaded: int
     elapsed_seconds: float
+    files_failed: int = 0
+    failures: list[TransferFailure] = field(default_factory=list)
 
     @property
     def bytes_per_second(self) -> float:
@@ -268,6 +276,9 @@ class FTPTransport:
                 self._reset_thread_client()
                 raise
 
+        # Never leave a partial file in a backup tree where it could later be
+        # hashed or restored as though it were a complete remote artifact.
+        local_path.unlink(missing_ok=True)
         raise RuntimeError(
             f"FTP download failed after {max_attempts} attempts: {remote_file.path} "
             f"({type(last_error).__name__}: {last_error})"
@@ -288,6 +299,7 @@ class FTPTransport:
         bytes_downloaded = 0
         completed = 0
         total_bytes = sum(item.size or 0 for item in files)
+        failures: list[TransferFailure] = []
 
         with ThreadPoolExecutor(max_workers=max(1, self.config.workers), thread_name_prefix="ftp") as pool:
             futures = {
@@ -296,7 +308,42 @@ class FTPTransport:
             }
             for future in as_completed(futures):
                 item = futures[future]
-                status, transferred = future.result()
+                try:
+                    status, transferred = future.result()
+                except Exception as exc:
+                    completed += 1
+                    failure = TransferFailure(
+                        path=item.path,
+                        error=f"{type(exc).__name__}: {exc}",
+                    )
+                    failures.append(failure)
+                    if progress:
+                        elapsed = max(time.monotonic() - started, 0.001)
+                        progress({
+                            "phase": "file_failed",
+                            "remote_root": remote_root,
+                            "current_file": item.path,
+                            "files_total": len(files),
+                            "files_completed": completed,
+                            "files_failed": len(failures),
+                            "error": failure.error,
+                        })
+                        progress({
+                            "phase": "transfer",
+                            "remote_root": remote_root,
+                            "current_file": item.path,
+                            "files_total": len(files),
+                            "files_completed": completed,
+                            "files_downloaded": downloaded,
+                            "files_skipped": skipped,
+                            "files_failed": len(failures),
+                            "bytes_downloaded": bytes_downloaded,
+                            "bytes_total": total_bytes,
+                            "elapsed_seconds": elapsed,
+                            "bytes_per_second": bytes_downloaded / elapsed,
+                        })
+                    continue
+
                 completed += 1
                 bytes_downloaded += transferred
                 if status == "skipped":
@@ -314,6 +361,7 @@ class FTPTransport:
                         "files_completed": completed,
                         "files_downloaded": downloaded,
                         "files_skipped": skipped,
+                        "files_failed": len(failures),
                         "bytes_downloaded": bytes_downloaded,
                         "bytes_total": total_bytes,
                         "elapsed_seconds": elapsed,
@@ -328,6 +376,7 @@ class FTPTransport:
                 "files_total": len(files),
                 "files_downloaded": downloaded,
                 "files_skipped": skipped,
+                "files_failed": len(failures),
                 "bytes_downloaded": bytes_downloaded,
                 "bytes_total": total_bytes,
                 "elapsed_seconds": elapsed,
@@ -340,6 +389,8 @@ class FTPTransport:
             files_skipped=skipped,
             bytes_downloaded=bytes_downloaded,
             elapsed_seconds=elapsed,
+            files_failed=len(failures),
+            failures=failures,
         )
 
     def download_file(self, remote_path: str, local_path: Path, resume: bool = True) -> TransferStats:

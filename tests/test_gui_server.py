@@ -43,8 +43,10 @@ def test_gui_html_is_self_contained_vietnamese_and_readable() -> None:
     assert "Sửa kết nối FTP" in html
     assert "Lưu & kiểm tra kết nối" in html
     assert "wpclean-readability" in html
-    assert "page-head h1{font-size:28px}" in html
-    assert "field input,.field select{font-size:14px}" in html
+    assert "html,body{font-size:16px" in html
+    assert "page-head h1{font-size:32px}" in html
+    assert "project-name h3{font-size:17px}" in html
+    assert "field input,.field select{font-size:16px}" in html
     assert 'type="password"' not in html
     assert "test-token" in html
     assert "https://cdn" not in html

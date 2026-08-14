@@ -27,9 +27,12 @@ class Finding:
     signals: list[Signal] = field(default_factory=list)
     preview: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
+    action_override: str | None = None
 
     @property
     def recommended_action(self) -> str:
+        if self.action_override:
+            return self.action_override
         if self.score >= 80:
             return "REVIEW / LIKELY DELETE"
         if self.score >= 60:

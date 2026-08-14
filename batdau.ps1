@@ -116,5 +116,5 @@ if ($LASTEXITCODE -ne 0) {
 ThanhCong 'Môi trường chạy đã đầy đủ.'
 
 Buoc 'BƯỚC 2 - Mở trình điều khiển dự án'
-& $uvExe run python -m wpclean.operator_wizard
+& $uvExe run python -m wpclean.operator_entry
 exit $LASTEXITCODE

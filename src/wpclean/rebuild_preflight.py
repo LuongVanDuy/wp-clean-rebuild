@@ -160,8 +160,10 @@ def run_rebuild_preflight(
         progress({"phase": "inventory_start", "remote_root": remote_root})
 
     def inventory_progress(event: dict) -> None:
-        if progress:
-            progress({"phase": "inventory", **event})
+        if not progress:
+            return
+        normalized = {key: value for key, value in event.items() if key != "phase"}
+        progress({"phase": "inventory", "inventory_phase": event.get("phase"), **normalized})
 
     remote_files = transport.list_files_recursive(remote_root, progress=inventory_progress)
 

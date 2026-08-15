@@ -29,6 +29,17 @@ jobs:
           python-version: "3.13"
       - run: python -m pip install --upgrade pip
       - run: pip install -e .
+      - name: Parse launcher with Windows PowerShell 5
+        shell: powershell
+        run: |
+          $tokens = $null
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path '.\giaodien.ps1'), [ref]$tokens, [ref]$errors) | Out-Null
+          if ($errors.Count -gt 0) {
+            $errors | ForEach-Object { Write-Error $_.Message }
+            exit 1
+          }
+          Write-Host 'Windows PowerShell 5 launcher parse OK'
       - name: Import production GUI entry on Windows
         run: python -c "import wpclean.gui_parallel_entry; print('parallel GUI import OK')"
       - name: Compile production GUI modules

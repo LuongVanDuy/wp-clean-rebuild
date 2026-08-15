@@ -1,48 +1,26 @@
-﻿$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
 
-function TieuDe($text) {
-    Write-Host "`n============================================================" -ForegroundColor DarkCyan
-    Write-Host " $text" -ForegroundColor Cyan
-    Write-Host "============================================================" -ForegroundColor DarkCyan
+function Buoc([string]$Text) {
+    Write-Host "`n>> $Text" -ForegroundColor Cyan
 }
 
-function Buoc($text) {
-    Write-Host "`n==> $text" -ForegroundColor Cyan
+function ThanhCong([string]$Text) {
+    Write-Host "[OK] $Text" -ForegroundColor Green
 }
 
-function ThanhCong($text) {
-    Write-Host "[OK] $text" -ForegroundColor Green
+function CanhBao([string]$Text) {
+    Write-Host "[!] $Text" -ForegroundColor Yellow
 }
 
-function CanhBao($text) {
-    Write-Host "[CANH BAO] $text" -ForegroundColor Yellow
+function Loi([string]$Text) {
+    Write-Host "[X] $Text" -ForegroundColor Red
 }
 
-function Loi($text) {
-    Write-Host "[LOI] $text" -ForegroundColor Red
-}
-
-function Hoi-CoKhong($message, $defaultYes = $true) {
-    $suffix = if ($defaultYes) { '[Y/n]' } else { '[y/N]' }
-    $answer = Read-Host "$message $suffix"
-    if ([string]::IsNullOrWhiteSpace($answer)) { return $defaultYes }
+function Hoi-CoKhong([string]$Text) {
+    $answer = Read-Host "$Text [Y/n]"
+    if ([string]::IsNullOrWhiteSpace($answer)) { return $true }
     return $answer.Trim().ToLowerInvariant() -in @('y', 'yes', 'c', 'co', 'có')
-}
-
-function Tim-Uv {
-    $cmd = Get-Command uv -ErrorAction SilentlyContinue
-    if ($cmd) { return $cmd.Source }
-
-    $candidates = @(
-        (Join-Path $env:USERPROFILE '.local\bin\uv.exe'),
-        (Join-Path $env:LOCALAPPDATA 'Programs\uv\uv.exe'),
-        (Join-Path $env:LOCALAPPDATA 'uv\uv.exe')
-    ) | Select-Object -Unique
-
-    foreach ($candidate in $candidates) {
-        if (Test-Path $candidate) { return $candidate }
-    }
-    return $null
 }
 
 function KiemTra-LenhNative {
@@ -50,74 +28,74 @@ function KiemTra-LenhNative {
         [Parameter(Mandatory = $true)][string]$FilePath,
         [Parameter(Mandatory = $true)][string[]]$Arguments
     )
-
-    $oldErrorActionPreference = $ErrorActionPreference
+    $oldPreference = $ErrorActionPreference
     try {
         $ErrorActionPreference = 'SilentlyContinue'
-        & $FilePath @Arguments 1>$null 2>$null
-        $exitCode = $LASTEXITCODE
-    }
-    catch {
-        $exitCode = 1
+        & $FilePath @Arguments *> $null
+        return ($LASTEXITCODE -eq 0)
     }
     finally {
-        $ErrorActionPreference = $oldErrorActionPreference
+        $ErrorActionPreference = $oldPreference
     }
-    return ($exitCode -eq 0)
 }
 
-TieuDe 'WP CLEAN REBUILD - GIAO DIỆN ĐIỀU KHIỂN'
-Write-Host 'Hệ thống sẽ kiểm tra môi trường rồi tự mở giao diện trong trình duyệt.'
-Write-Host 'Không cần sử dụng terminal để vận hành dự án sau khi giao diện đã mở.'
+function Tim-Uv {
+    $cmd = Get-Command uv -ErrorAction SilentlyContinue
+    if ($cmd) { return $cmd.Source }
+    $candidate = Join-Path $env:USERPROFILE '.local\bin\uv.exe'
+    if (Test-Path $candidate) { return $candidate }
+    return $null
+}
 
-$projectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
-Set-Location $projectRoot
+$scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+Set-Location $scriptDir
 
-Buoc 'BƯỚC 1 - Kiểm tra môi trường chạy'
+Write-Host ''
+Write-Host 'WP CLEAN REBUILD - GIAO DIEN LOCAL' -ForegroundColor White
+Write-Host '===================================' -ForegroundColor DarkGray
+
+Buoc 'BƯỚC 1 - Kiểm tra môi trường'
 $uvExe = Tim-Uv
 if (-not $uvExe) {
-    CanhBao 'Chưa có uv - công cụ quản lý Python/runtime của dự án.'
-    if (-not (Hoi-CoKhong 'Bạn có muốn cài uv tự động từ nguồn chính thức không?')) {
+    CanhBao 'Chưa có uv trên máy này.'
+    if (-not (Hoi-CoKhong 'Bạn có muốn cài uv tự động không?')) {
         Loi 'Không thể tiếp tục khi chưa có uv.'
         exit 2
     }
-
-    Buoc 'Đang tải bộ cài uv chính thức'
-    $installer = Join-Path $env:TEMP 'wpclean-uv-install.ps1'
-    Invoke-WebRequest -UseBasicParsing -Uri 'https://astral.sh/uv/install.ps1' -OutFile $installer
-    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installer
-    if ($LASTEXITCODE -ne 0) {
-        Loi 'Cài uv thất bại.'
+    try {
+        Invoke-RestMethod https://astral.sh/uv/install.ps1 | Invoke-Expression
+    }
+    catch {
+        Loi "Cài uv thất bại: $($_.Exception.Message)"
         exit 2
     }
     $uvExe = Tim-Uv
     if (-not $uvExe) {
-        Loi 'uv đã cài nhưng hệ thống chưa tìm thấy uv.exe.'
+        Loi 'Đã chạy trình cài uv nhưng vẫn chưa tìm thấy uv.exe.'
         exit 2
     }
 }
-ThanhCong "Đã có uv: $(& $uvExe --version)"
+ThanhCong "uv: $uvExe"
 
 $pythonReady = KiemTra-LenhNative -FilePath $uvExe -Arguments @('python', 'find', '3.13')
 if (-not $pythonReady) {
-    CanhBao 'Máy này chưa có Python 3.13 phù hợp cho WP Clean Rebuild.'
-    if (-not (Hoi-CoKhong 'Bạn có muốn tải và cài Python 3.13 tự động bằng uv không?')) {
+    CanhBao 'Chưa có Python 3.13 do uv quản lý.'
+    if (-not (Hoi-CoKhong 'Bạn có muốn cài Python 3.13 tự động không?')) {
         Loi 'Không thể tiếp tục khi chưa có Python 3.13.'
         exit 2
     }
-
-    Buoc 'Đang tải và cài Python 3.13 - vui lòng chờ'
+    Buoc 'Đang cài Python 3.13'
     & $uvExe python install 3.13
     if ($LASTEXITCODE -ne 0) {
-        Loi 'Cài Python 3.13 thất bại. Hãy kiểm tra kết nối Internet hoặc báo kỹ thuật.'
+        Loi 'Cài Python 3.13 thất bại.'
         exit 2
     }
+}
 
-    $pythonReady = KiemTra-LenhNative -FilePath $uvExe -Arguments @('python', 'find', '3.13')
-    if (-not $pythonReady) {
-        Loi 'uv báo đã cài nhưng vẫn không tìm thấy Python 3.13. Vui lòng báo kỹ thuật.'
-        exit 2
-    }
+$pythonReady = KiemTra-LenhNative -FilePath $uvExe -Arguments @('python', 'find', '3.13')
+if (-not $pythonReady) {
+    Loi 'Python 3.13 vẫn chưa sẵn sàng sau khi cài.'
+    exit 2
 }
 ThanhCong 'Python 3.13 đã sẵn sàng.'
 
@@ -145,6 +123,6 @@ ThanhCong 'Môi trường chạy đã đầy đủ.'
 
 Buoc 'BƯỚC 2 - Mở giao diện local'
 Write-Host 'Trình duyệt sẽ tự mở. Giữ cửa sổ này chạy trong lúc sử dụng giao diện.' -ForegroundColor Cyan
-# gui_ftp_logging_entry bọc production GUI trước đây chạy trực tiếp bằng: python -m wpclean.gui_no_fresh_entry
-& $uvExe run python -m wpclean.gui_ftp_logging_entry
+# gui_parallel_entry giữ Clean/Rebuild + journal + FTP diagnostics và cho phép nhiều website khác nhau chạy đồng thời.
+& $uvExe run python -m wpclean.gui_parallel_entry
 exit $LASTEXITCODE

@@ -123,4 +123,7 @@ def test_production_gui_injects_immediate_ftp_test_terminal_feedback() -> None:
 def test_launcher_uses_parallel_production_entry() -> None:
     root = Path(__file__).resolve().parents[1]
     script = (root / "giaodien.ps1").read_text(encoding="utf-8-sig")
-    assert "& $uvExe run python -m wpclean.gui_parallel_entry" in script
+    assert "Chay-GuiEntry -Module 'wpclean.gui_parallel_entry'" in script
+    assert "Chay-GuiEntry -Module 'wpclean.gui_ftp_logging_entry'" in script
+    assert "gui-startup.log" in script
+    assert "Nhấn Enter để đóng cửa sổ" in script

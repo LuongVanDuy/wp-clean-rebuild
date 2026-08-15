@@ -120,7 +120,7 @@ def test_production_gui_injects_immediate_ftp_test_terminal_feedback() -> None:
     assert "Cài WordPress mới</button>" not in html
 
 
-def test_launcher_uses_ftp_logging_production_entry() -> None:
+def test_launcher_uses_parallel_production_entry() -> None:
     root = Path(__file__).resolve().parents[1]
     script = (root / "giaodien.ps1").read_text(encoding="utf-8-sig")
-    assert "& $uvExe run python -m wpclean.gui_ftp_logging_entry" in script
+    assert "& $uvExe run python -m wpclean.gui_parallel_entry" in script

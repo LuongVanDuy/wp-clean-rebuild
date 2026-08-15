@@ -52,18 +52,20 @@ def _permission_error(exc: Exception) -> bool:
 
 
 def _delete_file(client, path: str, *, progress: ProgressCallback | None = None) -> None:
+    first_error: Exception | None = None
     try:
         client.delete(path)
         return
-    except Exception as first_exc:
-        if _missing_error(first_exc):
+    except Exception as exc:
+        if _missing_error(exc):
             return
-        if not _permission_error(first_exc):
+        if not _permission_error(exc):
             raise
+        first_error = exc
 
     parent = str(PurePosixPath(path).parent)
     attempts: list[str] = []
-    last_exc: Exception = first_exc
+    last_exc: Exception = first_error or RuntimeError("unknown FTP delete error")
     for file_mode, parent_mode in (("666", "755"), ("777", "777")):
         file_ok, file_detail = _chmod(client, path, file_mode)
         parent_ok, parent_detail = _chmod(client, parent, parent_mode)
@@ -100,18 +102,20 @@ def _delete_file(client, path: str, *, progress: ProgressCallback | None = None)
 
 
 def _remove_dir(client, path: str, *, progress: ProgressCallback | None = None) -> None:
+    first_error: Exception | None = None
     try:
         client.rmd(path)
         return
-    except Exception as first_exc:
-        if _missing_error(first_exc):
+    except Exception as exc:
+        if _missing_error(exc):
             return
-        if not _permission_error(first_exc):
+        if not _permission_error(exc):
             raise
+        first_error = exc
 
     parent = str(PurePosixPath(path).parent)
     attempts: list[str] = []
-    last_exc: Exception = first_exc
+    last_exc: Exception = first_error or RuntimeError("unknown FTP rmd error")
     for dir_mode, parent_mode in (("755", "755"), ("777", "777")):
         dir_ok, dir_detail = _chmod(client, path, dir_mode)
         parent_ok, parent_detail = _chmod(client, parent, parent_mode)
@@ -178,31 +182,34 @@ def wipe_remote_root_with_permission_recovery(
             )
 
     def ensure_listable(path: str) -> list[tuple[str, dict]]:
+        first_error: Exception | None = None
         try:
             return list(transport._mlsd(client, path))
-        except Exception as first_exc:
-            if _missing_error(first_exc):
+        except Exception as exc:
+            if _missing_error(exc):
                 return []
-            if not _permission_error(first_exc):
+            if not _permission_error(exc):
                 raise
-            # A locked directory may also deny MLSD. Try owner-safe access first,
-            # then the explicit last-resort 777 requested for remediation.
-            last_exc: Exception = first_exc
-            for mode in ("755", "777"):
-                _chmod(client, path, mode)
-                try:
-                    return list(transport._mlsd(client, path))
-                except Exception as retry_exc:
-                    if _missing_error(retry_exc):
-                        return []
-                    if not _permission_error(retry_exc):
-                        raise
-                    last_exc = retry_exc
-            raise RuntimeError(
-                f"FTP không thể đọc thư mục để xóa: {path}. "
-                "Đã thử CHMOD 755/777 nhưng tài khoản FTP vẫn không đủ quyền; "
-                f"cần File Manager/SSH/hosting xử lý ownership hoặc ACL. Lỗi cuối: {last_exc}"
-            )
+            first_error = exc
+
+        # A locked directory may also deny MLSD. Try owner-safe access first,
+        # then the explicit last-resort 777 requested for remediation.
+        last_exc: Exception = first_error or RuntimeError("unknown FTP list error")
+        for mode in ("755", "777"):
+            _chmod(client, path, mode)
+            try:
+                return list(transport._mlsd(client, path))
+            except Exception as retry_exc:
+                if _missing_error(retry_exc):
+                    return []
+                if not _permission_error(retry_exc):
+                    raise
+                last_exc = retry_exc
+        raise RuntimeError(
+            f"FTP không thể đọc thư mục để xóa: {path}. "
+            "Đã thử CHMOD 755/777 nhưng tài khoản FTP vẫn không đủ quyền; "
+            f"cần File Manager/SSH/hosting xử lý ownership hoặc ACL. Lỗi cuối: {last_exc}"
+        )
 
     def remove_tree(path: str, *, root: bool = False) -> None:
         nonlocal deleted_files, deleted_dirs

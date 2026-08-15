@@ -126,6 +126,30 @@ def _target_key(profile) -> str:
     return f"{profile.protocol.lower()}://{profile.host.lower()}:{profile.port}{profile.remote_path.rstrip('/')}"
 
 
+def _safe_rebuild_partial(paths: dict[str, Any]) -> bool:
+    """Allow DB-only resume only after every pre-DB remote artifact is proven uploaded.
+
+    A previous GUI check considered ``wiped_files > 0`` enough, which could
+    incorrectly offer DB-only resume after a failure during wipe/core upload.
+    Retrying the rebuild from that state is safe because remote wipe is
+    idempotent; skipping directly to DB is not.
+    """
+    execution = server._json_read(paths["execute"])
+    if execution.get("database_imported"):
+        return False
+
+    clean_report = server._json_read(paths["backup"] / "clean" / "clean-report.json")
+    expected_uploads = int(clean_report.get("uploads_copied") or 0)
+    uploaded_uploads = int(execution.get("uploads_uploaded") or 0)
+
+    return bool(
+        int(execution.get("core_uploaded") or 0) > 0
+        and execution.get("wp_config_uploaded")
+        and execution.get("htaccess_uploaded")
+        and uploaded_uploads >= expected_uploads
+    )
+
+
 def _parallel_pipeline(name: str, options: dict[str, Any], job) -> None:
     """Run one project with project-local journal, stdout/stderr and confirmations."""
     report_dir, profile = gui_journal_entry._journal_dir(name)
@@ -225,6 +249,7 @@ def _render_parallel(token: str) -> str:
 # or terminal output.
 typer.confirm = _thread_confirm
 server._confirm_answers = _parallel_confirm_answers
+server._rebuild_partial = _safe_rebuild_partial
 server._run_pipeline = _parallel_pipeline
 server.start_job = _parallel_start_job
 server.test_connection = _parallel_test_connection

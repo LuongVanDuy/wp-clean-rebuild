@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import unquote, urlparse
 import json
+import hashlib
 import os
 import re
 import secrets
@@ -44,6 +45,10 @@ REPAIRS_DIR = PROJECT_ROOT / "repairs"
 TOKEN = secrets.token_urlsafe(32)
 PROJECT_RE = re.compile(r"^[a-zA-Z0-9._-]+$")
 ANSI_RE = re.compile(r"\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
+
+
+def _secret_fingerprint(value: str) -> str:
+    return hashlib.sha256(str(value).encode("utf-8")).hexdigest()
 
 
 @dataclass
@@ -428,6 +433,7 @@ def create_project(data: dict[str, Any]) -> dict[str, Any]:
         "passive": bool(data.get("passive", True)),
         "workers": workers,
         "blockMb": block_mb,
+        "initialFtpPasswordFingerprint": _secret_fingerprint(password),
     }
     SITES_DIR.mkdir(parents=True, exist_ok=True)
     _json_write(path, payload)
@@ -473,6 +479,7 @@ _REBUILD_PROGRESS_FIXED = {
     "wipe_inventory_complete": 12,
     "upload_wp_config": 59,
     "upload_htaccess": 60,
+    "db_import_prepare": 83,
     "db_import_upload": 84,
     "db_import_execute": 90,
     "db_import_cleanup": 97,
@@ -548,7 +555,23 @@ def _progress(job: GuiJob, event: dict[str, Any]) -> None:
     failed = number("files_failed", fallback=job.failed_items)
     attempt = number("attempt", fallback=0)
     max_attempts = number("max_attempts", fallback=0)
-    if job.stage == "rebuild" and phase:
+    plugin_total = number("plugin_total", fallback=0)
+    if job.stage == "plugin" and plugin_total:
+        plugin_completed = min(plugin_total, number("plugin_completed", fallback=0))
+        completed = plugin_completed
+        total = plugin_total
+        file_total = number("files_total", fallback=0)
+        file_completed = min(file_total, number("files_completed", fallback=0))
+        within_plugin = (file_completed / file_total) if file_total else 0.0
+        if phase == "plugin_lookup":
+            percent = round(10 * (plugin_completed / plugin_total))
+        else:
+            ratio = min(1.0, (plugin_completed + within_plugin) / plugin_total)
+            percent = round(10 + (85 * ratio))
+    elif job.stage == "plugin" and phase == "upload_mu_plugin":
+        ratio = min(1.0, completed / total) if total > 0 else 0.0
+        percent = round(96 + (3 * ratio))
+    elif job.stage == "rebuild" and phase:
         percent = _rebuild_progress_percent(phase, completed, total, job.percent)
     elif total:
         percent = int((completed / total) * 100)
@@ -582,9 +605,16 @@ def _progress(job: GuiJob, event: dict[str, Any]) -> None:
         "ftp_reconnect": "FTP tạm ngắt, đang kết nối lại",
         "ftp_path_fallback": "FTP đang đổi cách gửi lệnh xóa",
         "permission_recovery": "Đang xử lý quyền file trên hosting",
+        "db_import_prepare": "Đang chuẩn hóa SQL cho MySQL",
         "db_import_upload": "Đang chuẩn bị import database",
         "db_import_execute": "Đang import database sạch",
         "db_import_cleanup": "Đang dọn file import tạm",
+        "plugin_lookup": "Đang xác minh plugin đã chọn",
+        "plugin_download": "Đang tải plugin sạch",
+        "plugin_upload_start": "Đang chuẩn bị upload plugin",
+        "upload_wporg_plugin": "Đang upload plugin sạch",
+        "plugin_installed": "Đã cài plugin sạch",
+        "plugin_failed": "Một plugin cài chưa thành công",
         "upload_mu_plugin": "Đang upload MU-plugin sạch",
         "inventory": "Đang kiểm kê website hiện tại",
         "inventory_start": "Bắt đầu kiểm kê website",
@@ -896,9 +926,32 @@ def _run_pipeline(name: str, options: dict[str, Any], job: GuiJob) -> None:
                         )
                         return
             elif stage == "plugin":
-                job.set(message="Đang phân loại và cài plugin sạch", percent=10)
-                with _confirm_answers([True]):
-                    operator._stage_plugin(profile, transport, paths)
+                if not status.get("plugin_done"):
+                    choices = plugin_workflow.plugin_install_choices(paths["backup"])
+                    if choices and not options.get("pluginSelectionConfirmed"):
+                        _gate(
+                            job,
+                            stage,
+                            "Chọn plugin muốn cài",
+                            f"Phát hiện {len(choices)} plugin trong backup. Chỉ plugin được chọn mới được lấy bản sạch để cài.",
+                            {"type": "plugins", "plugins": choices},
+                        )
+                        return
+                    raw_selection = options.get("pluginSelection", [])
+                    if not isinstance(raw_selection, list):
+                        raise ValueError("Danh sách plugin được chọn không hợp lệ.")
+                    selected_slugs = [str(slug) for slug in raw_selection]
+                    job.set(message="Đang xác minh và cài plugin đã chọn", percent=0)
+                else:
+                    selected_slugs = None
+                    job.set(message="Đang quét và khôi phục MU-plugin", percent=96)
+                operator._stage_plugin(
+                    profile,
+                    transport,
+                    paths,
+                    selected_slugs=selected_slugs,
+                    progress=lambda event: _progress(job, event),
+                )
                 status_after = operator._infer_status(paths)
                 if not status_after.get("plugin_done") or not status_after.get("mu_plugin_done"):
                     raise RuntimeError("Plugin/MU-plugin chưa hoàn tất; hãy thử lại stage này.")

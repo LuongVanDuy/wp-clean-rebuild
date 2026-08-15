@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Callable, Iterable
 
 import typer
 
@@ -13,6 +14,22 @@ from .plugin_restore import (
     install_wordpress_org_plugin,
     inventory_backup_plugins,
 )
+
+
+ProgressCallback = Callable[[dict], None]
+
+
+def plugin_install_choices(backup_root: Path) -> list[dict[str, object]]:
+    """Return the local backup inventory used by the GUI selection gate."""
+    return [
+        {
+            "slug": item.slug,
+            "name": item.name or item.slug,
+            "version": item.version,
+            "kind": item.kind,
+        }
+        for item in inventory_backup_plugins(backup_root)
+    ]
 
 
 def _persist_plugin_report(report_path: Path, stage: PluginStageReport) -> Path:
@@ -41,13 +58,15 @@ def run_plugin_stage(
     transport,
     backup_root: Path,
     report_path: Path,
+    selected_slugs: Iterable[str] | None = None,
+    progress: ProgressCallback | None = None,
 ) -> PluginStageReport:
     stage = PluginStageReport()
     console.print("\n[bold cyan]PLUGIN RESTORE STAGE[/bold cyan]")
     console.print("[cyan]Backup plugin chỉ dùng để nhận diện danh sách; code plugin cũ sẽ KHÔNG được restore.[/cyan]")
 
-    inventory = inventory_backup_plugins(backup_root)
-    stage.inventory_count = len(inventory)
+    full_inventory = inventory_backup_plugins(backup_root)
+    stage.inventory_count = len(full_inventory)
     stage.inventory = [
         {
             "slug": item.slug,
@@ -58,15 +77,39 @@ def run_plugin_stage(
             "source_path": item.source_path,
             "candidate_slugs": item.candidate_slugs,
         }
-        for item in inventory
+        for item in full_inventory
     ]
 
-    if not inventory:
+    if not full_inventory:
+        stage.selection_confirmed = True
         console.print("[yellow]Không phát hiện plugin nào trong backup.[/yellow]")
         _persist_plugin_report(report_path, stage)
         return stage
 
-    console.print(f"Plugins phát hiện trong backup: [bold]{len(inventory)}[/bold]")
+    if selected_slugs is None:
+        inventory = full_inventory
+    else:
+        requested = {str(slug).strip() for slug in selected_slugs if str(slug).strip()}
+        available = {item.slug for item in full_inventory}
+        unknown = sorted(requested - available)
+        if unknown:
+            raise ValueError("Plugin được chọn không có trong backup: " + ", ".join(unknown))
+        inventory = [item for item in full_inventory if item.slug in requested]
+        stage.selection_confirmed = True
+        stage.selected_slugs = [item.slug for item in inventory]
+        stage.selected_count = len(inventory)
+
+        if not inventory:
+            stage.install_accepted = True
+            stage.warnings.append("Operator chose not to install any backup plugins.")
+            console.print("[yellow]Đã bỏ qua cài plugin theo lựa chọn trên giao diện.[/yellow]")
+            _persist_plugin_report(report_path, stage)
+            return stage
+
+    console.print(
+        f"Plugins đã chọn để kiểm tra/cài: [bold]{len(inventory)}[/bold]"
+        f"/{len(full_inventory)} phát hiện trong backup"
+    )
     with console.status("[cyan]Đang kiểm tra plugin trên WordPress.org...[/cyan]", spinner="dots") as status:
         def lookup_progress(event: dict) -> None:
             if event.get("phase") != "plugin_lookup":
@@ -75,6 +118,16 @@ def run_plugin_stage(
                 f"[cyan]WordPress.org lookup: {event.get('completed', 0)}/{event.get('total', 0)} | "
                 f"{event.get('slug', '')} → {event.get('status', '')}[/cyan]"
             )
+            if progress:
+                progress(
+                    {
+                        **event,
+                        "plugin_completed": event.get("completed", 0),
+                        "plugin_total": event.get("total", len(inventory)),
+                        "unit": "plugin",
+                        "current": event.get("slug", ""),
+                    }
+                )
 
         classifications = classify_plugins(
             inventory,
@@ -89,6 +142,11 @@ def run_plugin_stage(
     stage.wordpress_org_count = len(public)
     stage.manual_count = len(manual)
     stage.lookup_error_count = len(lookup_errors)
+    stage.install_target_count = len(public)
+    if selected_slugs is None and not public:
+        stage.selection_confirmed = True
+        stage.selected_slugs = [item.inventory.slug for item in classifications]
+        stage.selected_count = len(classifications)
 
     if public:
         console.print("\n[bold green]Có trên WordPress.org — hỗ trợ cài bản sạch mới nhất:[/bold green]")
@@ -125,12 +183,15 @@ def run_plugin_stage(
         console.print(f"Plugin report: {standalone}")
         return stage
 
-    stage.install_prompted = True
-    install_public = typer.confirm(
-        f"Bạn có muốn tải và cài {len(public)} plugin sạch từ WordPress.org không?",
-        default=True,
+    stage.install_prompted = selected_slugs is None
+    install_public = selected_slugs is not None or typer.confirm(
+        f"Bạn có muốn tải và cài {len(public)} plugin sạch từ WordPress.org không?", default=True
     )
+    stage.selection_confirmed = True
     if not install_public:
+        stage.selected_slugs = []
+        stage.selected_count = 0
+        stage.install_target_count = 0
         stage.warnings.append("User declined automatic WordPress.org plugin installation.")
         console.print("[yellow]Đã bỏ qua cài plugin WordPress.org theo lựa chọn của bạn.[/yellow]")
         standalone = _persist_plugin_report(report_path, stage)
@@ -138,6 +199,10 @@ def run_plugin_stage(
         return stage
 
     stage.install_accepted = True
+    if selected_slugs is None:
+        stage.selected_slugs = [item.inventory.slug for item in classifications]
+        stage.selected_count = len(classifications)
+    _persist_plugin_report(report_path, stage)
     console.print("\n[bold cyan]Bắt đầu cài plugin sạch từ WordPress.org...[/bold cyan]")
     for index, item in enumerate(public, start=1):
         assert item.wporg is not None
@@ -164,6 +229,20 @@ def run_plugin_stage(
                             f"[cyan]Uploading {item.wporg.name}: "
                             f"{event.get('files_completed', 0)}/{event.get('files_total', 0)} | {current}[/cyan]"
                         )
+                    if progress:
+                        payload = dict(event)
+                        payload.update(
+                            {
+                                "plugin_completed": index - 1,
+                                "plugin_total": len(public),
+                                "plugin_name": item.wporg.name,
+                                "plugin_slug": item.inventory.slug,
+                                "unit": "plugin",
+                            }
+                        )
+                        if not payload.get("current"):
+                            payload["current"] = item.wporg.name
+                        progress(payload)
 
                 installed = install_wordpress_org_plugin(
                     profile,
@@ -184,6 +263,17 @@ def run_plugin_stage(
                 }
             )
             stage.installed_count += 1
+            if progress:
+                progress(
+                    {
+                        "phase": "plugin_installed",
+                        "plugin_completed": index,
+                        "plugin_total": len(public),
+                        "current": installed.name,
+                        "unit": "plugin",
+                    }
+                )
+            _persist_plugin_report(report_path, stage)
             console.print(
                 f"[green]✓ Installed {installed.name} {installed.version}: "
                 f"{installed.files_uploaded} files | SHA-256 {installed.package_sha256}[/green]"
@@ -191,6 +281,18 @@ def run_plugin_stage(
         except Exception as exc:
             warning = f"Plugin install failed for {item.inventory.slug}: {type(exc).__name__}: {exc}"
             stage.warnings.append(warning)
+            if progress:
+                progress(
+                    {
+                        "phase": "plugin_failed",
+                        "plugin_completed": index,
+                        "plugin_total": len(public),
+                        "files_failed": 1,
+                        "current": item.wporg.name,
+                        "unit": "plugin",
+                    }
+                )
+            _persist_plugin_report(report_path, stage)
             console.print(f"[red]✗ {warning}[/red]")
             console.print("[yellow]Tiếp tục plugin kế tiếp; có thể chạy plugin-only stage lại sau.[/yellow]")
 
@@ -205,4 +307,4 @@ def run_plugin_stage(
     return stage
 
 
-__all__ = ["run_plugin_stage"]
+__all__ = ["plugin_install_choices", "run_plugin_stage"]

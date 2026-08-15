@@ -206,11 +206,30 @@ def reconcile_automatic_todos(
     *,
     execution: dict[str, Any] | None = None,
     operator_state: dict[str, Any] | None = None,
+    project_completed: bool = False,
+    ftp_password_changed: bool = False,
 ) -> list[dict[str, Any]]:
     execution = execution if isinstance(execution, dict) else {}
     operator_state = operator_state if isinstance(operator_state, dict) else {}
     theme = execution.get("theme_stage") if isinstance(execution.get("theme_stage"), dict) else {}
     plugins = execution.get("plugin_stage") if isinstance(execution.get("plugin_stage"), dict) else {}
+
+    if project_completed:
+        upsert_todo(
+            report_dir,
+            key="security:rotate-hosting-wordpress-credentials",
+            kind="security",
+            title="Đổi lại mật khẩu hosting và WordPress",
+            detail=(
+                "Đã ghi nhận mật khẩu FTP trong cấu hình được thay đổi sau khi tạo dự án."
+                if ftp_password_changed
+                else "Mật khẩu FTP vẫn trùng với mật khẩu lúc tạo dự án. Hãy đổi mật khẩu tài khoản "
+                "hosting/FTP và tài khoản quản trị WordPress sau khi hoàn tất xử lý."
+            ),
+            status="done" if ftp_password_changed else "pending",
+            force_status=ftp_password_changed,
+            metadata={"ftp_password_changed": ftp_password_changed},
+        )
 
     unsupported = str(theme.get("unsupported_theme") or "").strip()
     detection_unavailable = str(theme.get("mode") or "") == "detection-unavailable"

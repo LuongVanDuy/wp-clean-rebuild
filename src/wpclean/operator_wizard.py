@@ -299,7 +299,9 @@ def _infer_status(paths: dict[str, Path]) -> dict[str, Any]:
     plugin_installed = int(plugin.get("installed_count") or 0)
     plugin_lookup_errors = int(plugin.get("lookup_error_count") or 0)
     plugin_manual = int(plugin.get("manual_count") or 0)
-    if plugin and (plugin_installed < plugin_public or plugin_lookup_errors):
+    selection_confirmed = bool(plugin.get("selection_confirmed", True))
+    install_target = int(plugin.get("install_target_count", plugin_public) or 0)
+    if plugin and (not selection_confirmed or plugin_installed < install_target or plugin_lookup_errors):
         plugin_done = False
 
     final_status = str(final.get("status") or "")
@@ -639,19 +641,29 @@ def _stage_theme(profile: SiteConnectionProfile, transport: FTPTransport, paths:
     console.print("[green]✓ Theme stage hoàn tất.[/green]")
 
 
-def _stage_plugin(profile: SiteConnectionProfile, transport: FTPTransport, paths: dict[str, Path]) -> None:
+def _stage_plugin(
+    profile: SiteConnectionProfile,
+    transport: FTPTransport,
+    paths: dict[str, Path],
+    *,
+    selected_slugs=None,
+    progress=None,
+) -> None:
     console.print("\n[bold cyan]BƯỚC 11 — PLUGIN[/bold cyan]")
     result = run_plugin_stage(
         profile=profile,
         transport=transport,
         backup_root=paths["backup"],
         report_path=paths["execute"],
+        selected_slugs=selected_slugs,
+        progress=progress,
     )
     if result.lookup_error_count:
         raise TamDungQuyTrinh(
             f"Có {result.lookup_error_count} plugin chưa xác minh được trên WordPress.org. Chạy BATDAU lại để thử plugin stage sau."
         )
-    if result.wordpress_org_count and result.installed_count < result.wordpress_org_count:
+    install_target = int(result.install_target_count or 0)
+    if install_target and result.installed_count < install_target:
         raise TamDungQuyTrinh(
             "Một số plugin WordPress.org chưa được cài. Chạy BATDAU lại để hoàn tất plugin stage."
         )

@@ -82,6 +82,10 @@ class PluginStageReport:
     wordpress_org_count: int = 0
     manual_count: int = 0
     lookup_error_count: int = 0
+    selection_confirmed: bool = False
+    selected_count: int = 0
+    selected_slugs: list[str] = field(default_factory=list)
+    install_target_count: int = 0
     install_prompted: bool = False
     install_accepted: bool = False
     installed_count: int = 0

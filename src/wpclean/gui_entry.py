@@ -215,6 +215,9 @@ def _update_project(name: str, data: dict[str, Any]) -> dict[str, Any]:
             raise RuntimeError("Dự án đang chạy. Hãy chờ bước hiện tại dừng trước khi sửa FTP.")
 
     raw = server._json_read(profile_path)
+    initial_password_fingerprint = str(raw.get("initialFtpPasswordFingerprint") or "")
+    if not initial_password_fingerprint:
+        initial_password_fingerprint = server._secret_fingerprint(str(raw.get("password") or profile.password or ""))
     new_host = str(data.get("host") or profile.host).strip()
     username = str(data.get("username") or profile.username).strip()
     password = str(data.get("password") or raw.get("password") or "")
@@ -253,6 +256,7 @@ def _update_project(name: str, data: dict[str, Any]) -> dict[str, Any]:
             "passive": bool(data.get("passive", raw.get("passive", True))),
             "workers": workers,
             "blockMb": block_mb,
+            "initialFtpPasswordFingerprint": initial_password_fingerprint,
         }
     )
     server._json_write(profile_path, raw)

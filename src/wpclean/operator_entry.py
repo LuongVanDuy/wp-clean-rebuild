@@ -88,10 +88,16 @@ def _next_stage(status: dict[str, Any]) -> str:
     return "rebuild"
 
 
-def _stage_plugin(profile, transport, paths) -> None:
+def _stage_plugin(profile, transport, paths, *, selected_slugs=None, progress=None) -> None:
     status = _infer_status(paths)
     if not status["plugin_done"]:
-        _original_stage_plugin(profile, transport, paths)
+        _original_stage_plugin(
+            profile,
+            transport,
+            paths,
+            selected_slugs=selected_slugs,
+            progress=progress,
+        )
         status = _infer_status(paths)
 
     if not status["plugin_done"]:
@@ -110,20 +116,22 @@ def _stage_plugin(profile, transport, paths) -> None:
     )
 
     with wizard.console.status("[cyan]Đang quét và khôi phục MU-plugin an toàn...[/cyan]", spinner="dots") as status_ui:
-        def progress(event: dict) -> None:
+        def mu_progress(event: dict) -> None:
             if event.get("phase") != "upload_mu_plugin":
                 return
             current = str(event.get("current", ""))
             if len(current) > 65:
                 current = "…" + current[-64:]
             status_ui.update(f"[cyan]Đang upload MU-plugin sạch: {current}[/cyan]")
+            if progress:
+                progress(event)
 
         result = run_mu_plugin_stage(
             profile=profile,
             transport=transport,
             backup_root=paths["backup"],
             report_path=paths["execute"],
-            progress=progress,
+            progress=mu_progress,
         )
 
     if result.inventory_count == 0:

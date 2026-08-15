@@ -19,6 +19,7 @@ import zipfile
 
 from .backup import verify_manifest
 from .site_config import SiteConnectionProfile
+from .sql_import_compat import prepared_sql_for_import
 from .transport import FTPTransport
 
 
@@ -535,9 +536,17 @@ def _import_database(
     statements = 0
     execution_error: Exception | None = None
 
-    if progress:
-        progress({"phase": "db_import_upload", "current": data_name})
-    _upload_file(transport, remote_data, sql_path)
+    with prepared_sql_for_import(sql_path) as (import_sql, bit_rewrites):
+        if progress:
+            progress(
+                {
+                    "phase": "db_import_prepare",
+                    "bit_values_normalized": bit_rewrites,
+                    "current": sql_path.name,
+                }
+            )
+            progress({"phase": "db_import_upload", "current": data_name})
+        _upload_file(transport, remote_data, import_sql)
     _upload_text(transport, remote_bridge, _database_import_bridge(token, data_name))
 
     try:

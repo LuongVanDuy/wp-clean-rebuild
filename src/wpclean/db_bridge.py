@@ -135,6 +135,7 @@ while ($tableRow = $tablesResult->fetch_row()) {
     }
 
     $fieldCount = $dataResult->field_count;
+    $fields = $dataResult->fetch_fields();
     $batch = [];
     $batchSize = 100;
 
@@ -143,6 +144,13 @@ while ($tableRow = $tablesResult->fetch_row()) {
         for ($i = 0; $i < $fieldCount; $i++) {
             if ($row[$i] === null) {
                 $values[] = 'NULL';
+            } elseif (isset($fields[$i]) && $fields[$i]->type === MYSQLI_TYPE_BIT) {
+                $bitValue = (string) $row[$i];
+                if (preg_match('/^[0-9]+$/D', $bitValue)) {
+                    $values[] = $bitValue;
+                } else {
+                    $values[] = '0x' . bin2hex($bitValue);
+                }
             } else {
                 $values[] = "'" . $db->real_escape_string($row[$i]) . "'";
             }

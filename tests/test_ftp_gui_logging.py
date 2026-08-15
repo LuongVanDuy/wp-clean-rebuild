@@ -120,11 +120,20 @@ def test_production_gui_injects_immediate_ftp_test_terminal_feedback() -> None:
     assert "Cài WordPress mới</button>" not in html
 
 
-def test_launcher_uses_parallel_production_entry() -> None:
+def test_launcher_uses_guarded_parallel_production_entry() -> None:
     root = Path(__file__).resolve().parents[1]
     script = (root / "giaodien.ps1").read_text(encoding="utf-8-sig")
-    assert "Chay-GuiEntry -Module 'wpclean.gui_parallel_entry'" in script
-    assert "Chay-GuiEntry -Module 'wpclean.gui_ftp_logging_entry'" in script
+    batch = (root / "GIAODIEN.bat").read_text(encoding="utf-8-sig")
+    launcher = (root / "launcher" / "WPCleanLauncher.cs").read_text(encoding="utf-8-sig")
+
+    assert "Run-GuiEntry -Module 'wpclean.gui_runtime_entry'" in script
+    assert "Run-GuiEntry -Module 'wpclean.gui_stable_runtime_entry'" in script
+    assert "$env:PYTHONUTF8 = '1'" in script
+    assert "$env:PYTHONIOENCODING = 'utf-8:replace'" in script
+    assert 'set "PYTHONUTF8=1"' in batch
+    assert 'set "PYTHONIOENCODING=utf-8:replace"' in batch
+    assert 'GIAODIEN.bat' in launcher
+    assert 'giaodien.ps1' not in launcher
     assert "gui-startup.log" in script
     assert "Press Enter to close" in script
     assert script.isascii()

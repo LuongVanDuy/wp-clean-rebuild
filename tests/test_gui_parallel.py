@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import threading
 import time
@@ -173,6 +174,53 @@ def test_thread_stream_router_does_not_cross_project_output() -> None:
     assert "".join(a.parts) == "project-a"
     assert "".join(b.parts) == "project-b"
     assert fallback.parts == []
+
+
+def test_db_only_resume_is_not_offered_after_wipe_or_partial_core(tmp_path: Path) -> None:
+    backup = tmp_path / "backup"
+    clean = backup / "clean"
+    clean.mkdir(parents=True)
+    (clean / "clean-report.json").write_text(json.dumps({"uploads_copied": 12}), encoding="utf-8")
+    execute = tmp_path / "execute.json"
+    paths = {"backup": backup, "execute": execute}
+
+    execute.write_text(json.dumps({"wiped_files": 900, "core_uploaded": 0}), encoding="utf-8")
+    assert parallel_gui._safe_rebuild_partial(paths) is False
+
+    execute.write_text(
+        json.dumps(
+            {
+                "wiped_files": 900,
+                "core_uploaded": 1500,
+                "wp_config_uploaded": True,
+                "htaccess_uploaded": True,
+                "uploads_uploaded": 4,
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert parallel_gui._safe_rebuild_partial(paths) is False
+
+
+def test_db_only_resume_is_allowed_after_all_pre_db_uploads(tmp_path: Path) -> None:
+    backup = tmp_path / "backup"
+    clean = backup / "clean"
+    clean.mkdir(parents=True)
+    (clean / "clean-report.json").write_text(json.dumps({"uploads_copied": 12}), encoding="utf-8")
+    execute = tmp_path / "execute.json"
+    execute.write_text(
+        json.dumps(
+            {
+                "core_uploaded": 1500,
+                "wp_config_uploaded": True,
+                "htaccess_uploaded": True,
+                "uploads_uploaded": 12,
+                "database_imported": False,
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert parallel_gui._safe_rebuild_partial({"backup": backup, "execute": execute}) is True
 
 
 def test_parallel_gui_copy_mentions_multi_project_support() -> None:

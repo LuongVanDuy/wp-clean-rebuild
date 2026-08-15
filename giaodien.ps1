@@ -1,29 +1,29 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-function Buoc([string]$Text) {
+function Step([string]$Text) {
     Write-Host "`n>> $Text" -ForegroundColor Cyan
 }
 
-function ThanhCong([string]$Text) {
+function Ok([string]$Text) {
     Write-Host "[OK] $Text" -ForegroundColor Green
 }
 
-function CanhBao([string]$Text) {
+function Warn([string]$Text) {
     Write-Host "[!] $Text" -ForegroundColor Yellow
 }
 
-function Loi([string]$Text) {
+function Fail([string]$Text) {
     Write-Host "[X] $Text" -ForegroundColor Red
 }
 
-function Hoi-CoKhong([string]$Text) {
+function Ask-YesNo([string]$Text) {
     $answer = Read-Host "$Text [Y/n]"
     if ([string]::IsNullOrWhiteSpace($answer)) { return $true }
     return $answer.Trim().ToLowerInvariant() -in @('y', 'yes', 'c', 'co')
 }
 
-function KiemTra-LenhNative {
+function Test-NativeCommand {
     param(
         [Parameter(Mandatory = $true)][string]$FilePath,
         [Parameter(Mandatory = $true)][string[]]$Arguments
@@ -39,7 +39,7 @@ function KiemTra-LenhNative {
     }
 }
 
-function Tim-Uv {
+function Find-Uv {
     $cmd = Get-Command uv -ErrorAction SilentlyContinue
     if ($cmd) { return $cmd.Source }
     $candidate = Join-Path $env:USERPROFILE '.local\bin\uv.exe'
@@ -47,42 +47,40 @@ function Tim-Uv {
     return $null
 }
 
-function Ghi-StartupLog([string]$Text) {
+function Write-StartupLog([string]$Text) {
     try {
         $stamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
         Add-Content -Path $script:startupLog -Value "[$stamp] $Text" -Encoding UTF8
     }
     catch {
-        # Logging must never block the launcher.
+        # Startup logging must never block the launcher.
     }
 }
 
-function Chay-GuiEntry {
+function Run-GuiEntry {
     param(
         [Parameter(Mandatory = $true)][string]$Module,
         [Parameter(Mandatory = $true)][string]$Label
     )
 
-    Buoc $Label
-    Ghi-StartupLog "START $Module"
+    Step $Label
+    Write-StartupLog "START $Module"
     $oldPreference = $ErrorActionPreference
     try {
-        # Keep native stderr visible without turning it into a terminating
-        # Windows PowerShell 5 error while ErrorActionPreference is Stop.
         $ErrorActionPreference = 'SilentlyContinue'
         & $script:uvExe run python -m $Module
         $code = $LASTEXITCODE
     }
     catch {
         $code = 1
-        Loi "$Label failed: $($_.Exception.Message)"
-        Ghi-StartupLog "EXCEPTION $Module :: $($_.Exception.ToString())"
+        Fail "$Label failed: $($_.Exception.Message)"
+        Write-StartupLog "EXCEPTION $Module :: $($_.Exception.ToString())"
     }
     finally {
         $ErrorActionPreference = $oldPreference
     }
 
-    Ghi-StartupLog "EXIT $Module :: code=$code"
+    Write-StartupLog "EXIT $Module :: code=$code"
     return [int]$code
 }
 
@@ -92,16 +90,29 @@ $logDir = Join-Path $scriptDir 'logs'
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 $script:startupLog = Join-Path $logDir 'gui-startup.log'
 
+# Force Python to use UTF-8 even when Windows PowerShell 5 / legacy console
+# reports cp1252 or another narrow code page.
+$env:PYTHONUTF8 = '1'
+$env:PYTHONIOENCODING = 'utf-8:replace'
+try {
+    $utf8 = New-Object System.Text.UTF8Encoding($false)
+    [Console]::OutputEncoding = $utf8
+    [Console]::InputEncoding = $utf8
+}
+catch {
+    Write-StartupLog "Console UTF-8 setup warning :: $($_.Exception.Message)"
+}
+
 Write-Host ''
 Write-Host 'WP CLEAN REBUILD - LOCAL GUI' -ForegroundColor White
 Write-Host '============================' -ForegroundColor DarkGray
 
-Buoc 'STEP 1 - Check environment'
-$uvExe = Tim-Uv
+Step 'STEP 1 - Check environment'
+$uvExe = Find-Uv
 if (-not $uvExe) {
-    CanhBao 'uv is not installed on this computer.'
-    if (-not (Hoi-CoKhong 'Install uv automatically?')) {
-        Loi 'Cannot continue without uv.'
+    Warn 'uv is not installed on this computer.'
+    if (-not (Ask-YesNo 'Install uv automatically?')) {
+        Fail 'Cannot continue without uv.'
         Read-Host 'Press Enter to close'
         exit 2
     }
@@ -109,91 +120,91 @@ if (-not $uvExe) {
         Invoke-RestMethod https://astral.sh/uv/install.ps1 | Invoke-Expression
     }
     catch {
-        Loi "uv install failed: $($_.Exception.Message)"
-        Ghi-StartupLog "uv install failed :: $($_.Exception.ToString())"
+        Fail "uv install failed: $($_.Exception.Message)"
+        Write-StartupLog "uv install failed :: $($_.Exception.ToString())"
         Read-Host 'Press Enter to close'
         exit 2
     }
-    $uvExe = Tim-Uv
+    $uvExe = Find-Uv
     if (-not $uvExe) {
-        Loi 'uv installer finished but uv.exe was not found.'
+        Fail 'uv installer finished but uv.exe was not found.'
         Read-Host 'Press Enter to close'
         exit 2
     }
 }
 $script:uvExe = $uvExe
-ThanhCong "uv: $uvExe"
+Ok "uv: $uvExe"
 
-$pythonReady = KiemTra-LenhNative -FilePath $uvExe -Arguments @('python', 'find', '3.13')
+$pythonReady = Test-NativeCommand -FilePath $uvExe -Arguments @('python', 'find', '3.13')
 if (-not $pythonReady) {
-    CanhBao 'Python 3.13 managed by uv is not installed.'
-    if (-not (Hoi-CoKhong 'Install Python 3.13 automatically?')) {
-        Loi 'Cannot continue without Python 3.13.'
+    Warn 'Python 3.13 managed by uv is not installed.'
+    if (-not (Ask-YesNo 'Install Python 3.13 automatically?')) {
+        Fail 'Cannot continue without Python 3.13.'
         Read-Host 'Press Enter to close'
         exit 2
     }
-    Buoc 'Installing Python 3.13'
+    Step 'Installing Python 3.13'
     & $uvExe python install 3.13
     if ($LASTEXITCODE -ne 0) {
-        Loi 'Python 3.13 install failed.'
+        Fail 'Python 3.13 install failed.'
         Read-Host 'Press Enter to close'
         exit 2
     }
 }
 
-$pythonReady = KiemTra-LenhNative -FilePath $uvExe -Arguments @('python', 'find', '3.13')
+$pythonReady = Test-NativeCommand -FilePath $uvExe -Arguments @('python', 'find', '3.13')
 if (-not $pythonReady) {
-    Loi 'Python 3.13 is still unavailable after installation.'
+    Fail 'Python 3.13 is still unavailable after installation.'
     Read-Host 'Press Enter to close'
     exit 2
 }
-ThanhCong 'Python 3.13 is ready.'
+Ok 'Python 3.13 is ready.'
 
-$doctorReady = KiemTra-LenhNative -FilePath $uvExe -Arguments @('run', '--no-sync', 'wpclean', 'doctor')
+$doctorReady = Test-NativeCommand -FilePath $uvExe -Arguments @('run', '--no-sync', 'wpclean', 'doctor')
 if (-not $doctorReady) {
-    CanhBao 'Project environment or Python dependencies are incomplete.'
-    if (-not (Hoi-CoKhong 'Install/sync project dependencies automatically?')) {
-        Loi 'Cannot continue while project dependencies are incomplete.'
+    Warn 'Project environment or Python dependencies are incomplete.'
+    if (-not (Ask-YesNo 'Install/sync project dependencies automatically?')) {
+        Fail 'Cannot continue while project dependencies are incomplete.'
         Read-Host 'Press Enter to close'
         exit 2
     }
-    Buoc 'Installing and syncing project dependencies'
+    Step 'Installing and syncing project dependencies'
     & $uvExe sync
     if ($LASTEXITCODE -ne 0) {
-        Loi 'Dependency sync failed.'
+        Fail 'Dependency sync failed.'
         Read-Host 'Press Enter to close'
         exit 2
     }
 }
 
-$doctorReady = KiemTra-LenhNative -FilePath $uvExe -Arguments @('run', '--no-sync', 'wpclean', 'doctor')
+$doctorReady = Test-NativeCommand -FilePath $uvExe -Arguments @('run', '--no-sync', 'wpclean', 'doctor')
 if (-not $doctorReady) {
-    Loi 'Environment self-check still failed.'
-    CanhBao "Startup log: $startupLog"
+    Fail 'Environment self-check still failed.'
+    Warn "Startup log: $startupLog"
     Read-Host 'Press Enter to close'
     exit 2
 }
-ThanhCong 'Runtime environment is ready.'
+Ok 'Runtime environment is ready.'
 
-Buoc 'STEP 2 - Start local GUI'
+Step 'STEP 2 - Start local GUI'
 Write-Host 'The browser will open automatically. Keep this window open while using the GUI.' -ForegroundColor Cyan
 
-# Production entry: parallel project support + journal + FTP diagnostics.
-$guiExit = Chay-GuiEntry -Module 'wpclean.gui_parallel_entry' -Label 'Starting multi-project GUI'
+# Both entries go through a UTF-8 runtime guard before importing the GUI stack.
+$guiExit = Run-GuiEntry -Module 'wpclean.gui_runtime_entry' -Label 'Starting multi-project GUI'
 if ($guiExit -eq 0) {
     exit 0
 }
 
-Loi "Multi-project GUI stopped with exit code $guiExit."
-CanhBao "Startup log: $startupLog"
-CanhBao 'Trying the stable fallback GUI so work can continue.'
+Fail "Multi-project GUI stopped with exit code $guiExit."
+Warn "Startup log: $startupLog"
+Warn 'Trying the stable fallback GUI so work can continue.'
 
-$stableExit = Chay-GuiEntry -Module 'wpclean.gui_ftp_logging_entry' -Label 'Starting stable fallback GUI'
+$stableExit = Run-GuiEntry -Module 'wpclean.gui_stable_runtime_entry' -Label 'Starting stable fallback GUI'
 if ($stableExit -eq 0) {
     exit 0
 }
 
-Loi "Fallback GUI also failed to start (exit code $stableExit)."
-Loi 'Send logs\gui-startup.log to technical support.'
+Fail "Fallback GUI also failed to start (exit code $stableExit)."
+Fail 'Send logs\gui-startup.log and logs\gui-startup-python.log to technical support.'
 Read-Host 'Press Enter to close'
 exit $stableExit

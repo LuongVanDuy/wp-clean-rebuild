@@ -19,7 +19,34 @@ def _chmod(client, path: str, mode: str) -> tuple[bool, str]:
         return False, f"{type(exc).__name__}: {exc}"
 
 
+def _missing_error(exc: Exception) -> bool:
+    """Return True only for errors that clearly mean the FTP path is already gone.
+
+    DELETE/RMD/MLSD are inherently racy: a plugin, host-side cleanup, malware,
+    antivirus, or another server process may remove an entry after MLSD listed
+    it but before we delete it. In that case the desired wipe state has already
+    been reached and deletion is safely idempotent.
+    """
+    text = str(exc).lower()
+    markers = (
+        "no such file",
+        "no such directory",
+        "file not found",
+        "path not found",
+        "does not exist",
+        "cannot find the file",
+        "cannot find the path",
+        "system cannot find the file",
+        "system cannot find the path",
+        "winerror 2",
+        "winerror 3",
+    )
+    return isinstance(exc, FileNotFoundError) or any(marker in text for marker in markers)
+
+
 def _permission_error(exc: Exception) -> bool:
+    if _missing_error(exc):
+        return False
     text = str(exc).lower()
     return isinstance(exc, error_perm) or "permission denied" in text or text.startswith("550")
 
@@ -29,11 +56,14 @@ def _delete_file(client, path: str, *, progress: ProgressCallback | None = None)
         client.delete(path)
         return
     except Exception as first_exc:
+        if _missing_error(first_exc):
+            return
         if not _permission_error(first_exc):
             raise
 
     parent = str(PurePosixPath(path).parent)
     attempts: list[str] = []
+    last_exc: Exception = first_exc
     for file_mode, parent_mode in (("666", "755"), ("777", "777")):
         file_ok, file_detail = _chmod(client, path, file_mode)
         parent_ok, parent_detail = _chmod(client, parent, parent_mode)
@@ -55,6 +85,8 @@ def _delete_file(client, path: str, *, progress: ProgressCallback | None = None)
             client.delete(path)
             return
         except Exception as retry_exc:
+            if _missing_error(retry_exc):
+                return
             if not _permission_error(retry_exc):
                 raise
             last_exc = retry_exc
@@ -72,11 +104,14 @@ def _remove_dir(client, path: str, *, progress: ProgressCallback | None = None) 
         client.rmd(path)
         return
     except Exception as first_exc:
+        if _missing_error(first_exc):
+            return
         if not _permission_error(first_exc):
             raise
 
     parent = str(PurePosixPath(path).parent)
     attempts: list[str] = []
+    last_exc: Exception = first_exc
     for dir_mode, parent_mode in (("755", "755"), ("777", "777")):
         dir_ok, dir_detail = _chmod(client, path, dir_mode)
         parent_ok, parent_detail = _chmod(client, parent, parent_mode)
@@ -98,6 +133,8 @@ def _remove_dir(client, path: str, *, progress: ProgressCallback | None = None) 
             client.rmd(path)
             return
         except Exception as retry_exc:
+            if _missing_error(retry_exc):
+                return
             if not _permission_error(retry_exc):
                 raise
             last_exc = retry_exc
@@ -121,6 +158,8 @@ def wipe_remote_root_with_permission_recovery(
     SITE CHMOD never elevates the FTP account beyond hosting ownership/ACL rules.
     777 is used only as a last-resort temporary deletion aid; the target is then
     immediately deleted instead of leaving permissive files on the rebuilt site.
+    Paths that disappear between MLSD and DELETE/RMD are treated as successful
+    deletion because the requested final state has already been reached.
     """
     client = transport._new_client()
     deleted_files = 0
@@ -142,15 +181,20 @@ def wipe_remote_root_with_permission_recovery(
         try:
             return list(transport._mlsd(client, path))
         except Exception as first_exc:
+            if _missing_error(first_exc):
+                return []
             if not _permission_error(first_exc):
                 raise
             # A locked directory may also deny MLSD. Try owner-safe access first,
             # then the explicit last-resort 777 requested for remediation.
+            last_exc: Exception = first_exc
             for mode in ("755", "777"):
                 _chmod(client, path, mode)
                 try:
                     return list(transport._mlsd(client, path))
                 except Exception as retry_exc:
+                    if _missing_error(retry_exc):
+                        return []
                     if not _permission_error(retry_exc):
                         raise
                     last_exc = retry_exc

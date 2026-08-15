@@ -126,4 +126,5 @@ def test_launcher_uses_parallel_production_entry() -> None:
     assert "Chay-GuiEntry -Module 'wpclean.gui_parallel_entry'" in script
     assert "Chay-GuiEntry -Module 'wpclean.gui_ftp_logging_entry'" in script
     assert "gui-startup.log" in script
-    assert "Nhấn Enter để đóng cửa sổ" in script
+    assert "Press Enter to close" in script
+    assert script.isascii()

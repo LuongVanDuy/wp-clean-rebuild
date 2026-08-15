@@ -144,11 +144,18 @@ def test_gui_exposes_fresh_install_with_visible_footer_and_optional_mysql_admin(
     assert "Sửa thông tin & thử lại" in html
 
 
-def test_launcher_points_to_safe_fresh_gui_entry() -> None:
+def test_production_launcher_hides_fresh_install_without_removing_feature() -> None:
     root = Path(__file__).resolve().parents[1]
     script = (root / "giaodien.ps1").read_text(encoding="utf-8-sig")
-    assert "python -m wpclean.gui_fresh_safe_entry" in script
+    hidden_entry = (root / "src" / "wpclean" / "gui_no_fresh_entry.py").read_text(encoding="utf-8")
     safety = (root / "src" / "wpclean" / "gui_fresh_safe_entry.py").read_text(encoding="utf-8")
+
+    assert "python -m wpclean.gui_no_fresh_entry" in script
+    assert 'onclick="openFreshInstall()"' in hidden_entry
+    assert "html.replace(_FRESH_INSTALL_BUTTON" in hidden_entry
+    assert "gui_fresh_safe_entry" in hidden_entry
+
+    # Fresh Install stays implemented and tested; only the operator-facing launcher is hidden.
     assert "Preflight database PASS" in safety
     assert "trước destructive boundary" in safety
     assert "does not create a normal Clean/Rebuild project" in safety

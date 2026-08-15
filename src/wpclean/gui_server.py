@@ -1170,8 +1170,11 @@ class GuiHandler(BaseHTTPRequestHandler):
             match = re.fullmatch(r"/api/projects/([^/]+)/delete", path)
             if match:
                 name = unquote(match.group(1))
-                delete_project_local(name, str(body.get("confirmation") or ""))
-                _send_json(self, {"ok": True})
+                result = delete_project_local(name, str(body.get("confirmation") or ""))
+                payload = {"ok": True}
+                if isinstance(result, dict):
+                    payload.update(result)
+                _send_json(self, payload, 202 if payload.get("status") == "running" else 200)
                 return
             _send_json(self, {"error": "Không tìm thấy endpoint."}, 404)
         except Exception as exc:

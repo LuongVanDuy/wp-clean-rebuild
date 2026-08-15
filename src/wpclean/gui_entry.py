@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 from contextlib import redirect_stderr, redirect_stdout
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 import sys
+import threading
+import traceback
 
 from . import gui_server as server
 from . import gui_ui
@@ -16,6 +19,9 @@ _ORIGINAL_RENDER_APP = gui_ui.render_app
 _ORIGINAL_RUN_PIPELINE = server._run_pipeline
 _ORIGINAL_PROGRESS = server._progress
 _ANSI_RE = server.ANSI_RE
+_LOCAL_DELETION_KEY = "localDeletion"
+_LOCAL_DELETE_LOCK = threading.RLock()
+_LOCAL_DELETE_THREADS: dict[str, threading.Thread] = {}
 
 
 _READABILITY_CSS = r'''<style id="wpclean-readability">
@@ -178,7 +184,24 @@ def _run_pipeline_with_terminal(name: str, options: dict[str, Any], job) -> None
 
 def _project_payload(name: str) -> dict[str, Any]:
     payload = _ORIGINAL_PROJECT_PAYLOAD(name)
-    _profile_path, profile, _paths = server._profile_and_paths(name)
+    profile_path, profile, _paths = server._profile_and_paths(name)
+    raw = server._json_read(profile_path)
+    deletion = raw.get(_LOCAL_DELETION_KEY)
+    if isinstance(deletion, dict) and deletion.get("status") == "running":
+        with _LOCAL_DELETE_LOCK:
+            thread = _LOCAL_DELETE_THREADS.get(name)
+            if thread is None or not thread.is_alive():
+                deletion = {
+                    **deletion,
+                    "status": "interrupted",
+                    "message": "Lần xóa trước bị gián đoạn. Có thể tiếp tục xóa an toàn.",
+                    "updatedAt": datetime.now().astimezone().isoformat(timespec="seconds"),
+                }
+                raw[_LOCAL_DELETION_KEY] = deletion
+                server._json_write(profile_path, raw)
+    if isinstance(deletion, dict) and deletion:
+        payload["localDeletion"] = deletion
+        payload["nextLabel"] = str(deletion.get("message") or "Đang xóa dữ liệu local")
     payload["connection"] = {
         "host": profile.host,
         "username": profile.username,
@@ -215,6 +238,9 @@ def _update_project(name: str, data: dict[str, Any]) -> dict[str, Any]:
             raise RuntimeError("Dự án đang chạy. Hãy chờ bước hiện tại dừng trước khi sửa FTP.")
 
     raw = server._json_read(profile_path)
+    deletion = raw.get(_LOCAL_DELETION_KEY)
+    if isinstance(deletion, dict) and deletion.get("status") in {"running", "error", "interrupted"}:
+        raise RuntimeError("Dự án đang trong quá trình xóa dữ liệu local. Hãy hoàn tất hoặc thử lại việc xóa trước.")
     initial_password_fingerprint = str(raw.get("initialFtpPasswordFingerprint") or "")
     if not initial_password_fingerprint:
         initial_password_fingerprint = server._secret_fingerprint(str(raw.get("password") or profile.password or ""))
@@ -312,24 +338,138 @@ def _theme_gate(profile, paths, job) -> bool:
     return True
 
 
-def _delete_project_local(name: str, confirmation: str) -> None:
+def _write_deletion_state(profile_path: Path, state: dict[str, Any]) -> None:
+    if not profile_path.is_file():
+        return
+    raw = server._json_read(profile_path)
+    if not raw:
+        return
+    raw[_LOCAL_DELETION_KEY] = state
+    server._json_write(profile_path, raw)
+
+
+def _run_local_deletion(
+    name: str,
+    profile_path: Path,
+    targets: dict[str, Path],
+    state: dict[str, Any],
+) -> None:
     from . import project_delete_command as delete_module
 
+    steps = (
+        ("backup", "Đang xóa backup local", server.BACKUPS_DIR),
+        ("reports", "Đang xóa báo cáo local", server.REPORTS_DIR),
+        ("repairs", "Đang xóa dữ liệu sửa kỹ thuật", server.REPAIRS_DIR),
+    )
+    completed = list(state.get("completedTargets") or [])
+    try:
+        for key, message, allowed_root in steps:
+            state.update(
+                {
+                    "status": "running",
+                    "message": message,
+                    "current": key,
+                    "completedTargets": completed,
+                    "updatedAt": datetime.now().astimezone().isoformat(timespec="seconds"),
+                }
+            )
+            _write_deletion_state(profile_path, state)
+            delete_module._delete_local_path(targets[key], allowed_root)
+            if key not in completed:
+                completed.append(key)
+
+        state.update(
+            {
+                "status": "running",
+                "message": "Đang hoàn tất xóa dự án local",
+                "current": "profile",
+                "completedTargets": completed,
+                "updatedAt": datetime.now().astimezone().isoformat(timespec="seconds"),
+            }
+        )
+        _write_deletion_state(profile_path, state)
+        with server.JOBS_LOCK:
+            server.JOBS.pop(name, None)
+        delete_module._delete_local_path(profile_path, server.SITES_DIR)
+    except Exception as exc:
+        state.update(
+            {
+                "status": "error",
+                "message": "Xóa local chưa hoàn tất. Có thể thử lại từ phần còn dở.",
+                "error": f"{type(exc).__name__}: {exc}",
+                "technical": traceback.format_exc(limit=6),
+                "completedTargets": completed,
+                "updatedAt": datetime.now().astimezone().isoformat(timespec="seconds"),
+            }
+        )
+        _write_deletion_state(profile_path, state)
+    finally:
+        with _LOCAL_DELETE_LOCK:
+            current = _LOCAL_DELETE_THREADS.get(name)
+            if current is threading.current_thread():
+                _LOCAL_DELETE_THREADS.pop(name, None)
+
+
+def _delete_project_local(name: str, confirmation: str) -> dict[str, Any]:
     if confirmation != name:
         raise ValueError("Tên xác nhận không khớp.")
-    payload = server._project_payload(name)
-    if not payload.get("completed"):
-        raise RuntimeError("Chỉ được xóa project local sau khi dự án đã hoàn tất.")
+    try:
+        profile_path, profile, paths = server._profile_and_paths(name)
+    except FileNotFoundError:
+        # Reloading or retrying after the background task has already removed
+        # the profile is a successful idempotent delete, not an operator error.
+        return {"status": "completed", "alreadyDeleted": True}
 
-    profile_path, profile, paths = server._profile_and_paths(name)
-    backup_path = Path(paths["backup"])
-    # A resumed/new run can use backups/<host>-<timestamp>; delete exactly the
-    # backup root remembered by operator-state.json, never a guessed path.
-    delete_module._delete_local_path(backup_path, server.BACKUPS_DIR)
-    delete_module._delete_local_path(server.REPORTS_DIR / profile.host, server.REPORTS_DIR)
-    delete_module._delete_local_path(server.REPAIRS_DIR / profile.host, server.REPAIRS_DIR)
-    delete_module._delete_local_path(profile_path, server.SITES_DIR)
-    server.JOBS.pop(name, None)
+    with server.JOBS_LOCK:
+        job = server.JOBS.get(name)
+        if job and job.status == "running":
+            raise RuntimeError("Dự án đang chạy workflow. Hãy chờ bước hiện tại dừng trước khi xóa dữ liệu local.")
+
+    with _LOCAL_DELETE_LOCK:
+        existing = _LOCAL_DELETE_THREADS.get(name)
+        if existing is not None and existing.is_alive():
+            return {"status": "running", "alreadyRunning": True}
+
+        raw = server._json_read(profile_path)
+        previous = raw.get(_LOCAL_DELETION_KEY)
+        previous = previous if isinstance(previous, dict) else {}
+        if not previous:
+            payload = server._project_payload(name)
+            if not payload.get("completed"):
+                raise RuntimeError("Chỉ được xóa project local sau khi dự án đã hoàn tất.")
+
+        stored_targets = previous.get("targets")
+        stored_targets = stored_targets if isinstance(stored_targets, dict) else {}
+        targets = {
+            # A resumed/new run can use backups/<host>-<timestamp>; persist the
+            # exact path so a retry still finds it after reports are removed.
+            "backup": Path(str(stored_targets.get("backup") or paths["backup"])),
+            "reports": Path(str(stored_targets.get("reports") or (server.REPORTS_DIR / profile.host))),
+            "repairs": Path(str(stored_targets.get("repairs") or (server.REPAIRS_DIR / profile.host))),
+        }
+        now = datetime.now().astimezone().isoformat(timespec="seconds")
+        state = {
+            **previous,
+            "status": "running",
+            "message": "Đang chuẩn bị xóa dữ liệu local",
+            "error": "",
+            "technical": "",
+            "current": "preparing",
+            "startedAt": str(previous.get("startedAt") or now),
+            "updatedAt": now,
+            "targets": {key: str(path) for key, path in targets.items()},
+            "completedTargets": list(previous.get("completedTargets") or []),
+        }
+        _write_deletion_state(profile_path, state)
+        thread = threading.Thread(
+            target=_run_local_deletion,
+            args=(name, profile_path, targets, state),
+            daemon=True,
+            name=f"wpclean-delete-{name}",
+        )
+        _LOCAL_DELETE_THREADS[name] = thread
+        thread.start()
+        return {"status": "running", "alreadyRunning": False}
 
 
 gui_ui.render_app = _render_app

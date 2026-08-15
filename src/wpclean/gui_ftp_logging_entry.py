@@ -10,6 +10,7 @@ from . import gui_ui
 
 _BASE_RENDER = gui_ui.render_app
 _BASE_TEST_CONNECTION = server.test_connection
+_BASE_JOB_LOG = server.GuiJob.log
 _FTP_TEST_LOCK = threading.Lock()
 _FTP_TEST_ACTIVE: set[str] = set()
 
@@ -66,6 +67,17 @@ testFtp=async function(name){
 def _render_with_ftp_test_log(token: str) -> str:
     html = _BASE_RENDER(token)
     return html.replace("</script>\n</body>", _FTP_TEST_JS + "\n</script>\n</body>", 1)
+
+
+def _concise_job_log(self, text: str) -> None:
+    """Keep operator GUI logs concise while preserving the actionable error line."""
+    raw = str(text)
+    if raw.lstrip().startswith("Traceback (most recent call last):"):
+        lines = [line.strip() for line in raw.splitlines() if line.strip()]
+        final = lines[-1] if lines else "Lỗi Python không xác định"
+        _BASE_JOB_LOG(self, f"ERROR | {final}")
+        return
+    _BASE_JOB_LOG(self, text)
 
 
 def _ftp_error_message(exc: Exception, *, host: str, port: int) -> str:
@@ -146,6 +158,7 @@ def _test_connection_with_log(name: str):
 
 
 gui_ui.render_app = _render_with_ftp_test_log
+server.GuiJob.log = _concise_job_log
 server.test_connection = _test_connection_with_log
 
 

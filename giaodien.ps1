@@ -20,7 +20,7 @@ function Loi([string]$Text) {
 function Hoi-CoKhong([string]$Text) {
     $answer = Read-Host "$Text [Y/n]"
     if ([string]::IsNullOrWhiteSpace($answer)) { return $true }
-    return $answer.Trim().ToLowerInvariant() -in @('y', 'yes', 'c', 'co', 'có')
+    return $answer.Trim().ToLowerInvariant() -in @('y', 'yes', 'c', 'co')
 }
 
 function KiemTra-LenhNative {
@@ -67,15 +67,15 @@ function Chay-GuiEntry {
     Ghi-StartupLog "START $Module"
     $oldPreference = $ErrorActionPreference
     try {
-        # Native stderr must remain visible, but must not become a PowerShell
-        # terminating error under Windows PowerShell 5 + ErrorActionPreference=Stop.
+        # Keep native stderr visible without turning it into a terminating
+        # Windows PowerShell 5 error while ErrorActionPreference is Stop.
         $ErrorActionPreference = 'SilentlyContinue'
         & $script:uvExe run python -m $Module
         $code = $LASTEXITCODE
     }
     catch {
         $code = 1
-        Loi "$Label thất bại: $($_.Exception.Message)"
+        Loi "$Label failed: $($_.Exception.Message)"
         Ghi-StartupLog "EXCEPTION $Module :: $($_.Exception.ToString())"
     }
     finally {
@@ -93,31 +93,31 @@ New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 $script:startupLog = Join-Path $logDir 'gui-startup.log'
 
 Write-Host ''
-Write-Host 'WP CLEAN REBUILD - GIAO DIEN LOCAL' -ForegroundColor White
-Write-Host '===================================' -ForegroundColor DarkGray
+Write-Host 'WP CLEAN REBUILD - LOCAL GUI' -ForegroundColor White
+Write-Host '============================' -ForegroundColor DarkGray
 
-Buoc 'BƯỚC 1 - Kiểm tra môi trường'
+Buoc 'STEP 1 - Check environment'
 $uvExe = Tim-Uv
 if (-not $uvExe) {
-    CanhBao 'Chưa có uv trên máy này.'
-    if (-not (Hoi-CoKhong 'Bạn có muốn cài uv tự động không?')) {
-        Loi 'Không thể tiếp tục khi chưa có uv.'
-        Read-Host 'Nhấn Enter để đóng cửa sổ'
+    CanhBao 'uv is not installed on this computer.'
+    if (-not (Hoi-CoKhong 'Install uv automatically?')) {
+        Loi 'Cannot continue without uv.'
+        Read-Host 'Press Enter to close'
         exit 2
     }
     try {
         Invoke-RestMethod https://astral.sh/uv/install.ps1 | Invoke-Expression
     }
     catch {
-        Loi "Cài uv thất bại: $($_.Exception.Message)"
-        Ghi-StartupLog "Cài uv thất bại :: $($_.Exception.ToString())"
-        Read-Host 'Nhấn Enter để đóng cửa sổ'
+        Loi "uv install failed: $($_.Exception.Message)"
+        Ghi-StartupLog "uv install failed :: $($_.Exception.ToString())"
+        Read-Host 'Press Enter to close'
         exit 2
     }
     $uvExe = Tim-Uv
     if (-not $uvExe) {
-        Loi 'Đã chạy trình cài uv nhưng vẫn chưa tìm thấy uv.exe.'
-        Read-Host 'Nhấn Enter để đóng cửa sổ'
+        Loi 'uv installer finished but uv.exe was not found.'
+        Read-Host 'Press Enter to close'
         exit 2
     }
 }
@@ -126,73 +126,74 @@ ThanhCong "uv: $uvExe"
 
 $pythonReady = KiemTra-LenhNative -FilePath $uvExe -Arguments @('python', 'find', '3.13')
 if (-not $pythonReady) {
-    CanhBao 'Chưa có Python 3.13 do uv quản lý.'
-    if (-not (Hoi-CoKhong 'Bạn có muốn cài Python 3.13 tự động không?')) {
-        Loi 'Không thể tiếp tục khi chưa có Python 3.13.'
-        Read-Host 'Nhấn Enter để đóng cửa sổ'
+    CanhBao 'Python 3.13 managed by uv is not installed.'
+    if (-not (Hoi-CoKhong 'Install Python 3.13 automatically?')) {
+        Loi 'Cannot continue without Python 3.13.'
+        Read-Host 'Press Enter to close'
         exit 2
     }
-    Buoc 'Đang cài Python 3.13'
+    Buoc 'Installing Python 3.13'
     & $uvExe python install 3.13
     if ($LASTEXITCODE -ne 0) {
-        Loi 'Cài Python 3.13 thất bại.'
-        Read-Host 'Nhấn Enter để đóng cửa sổ'
+        Loi 'Python 3.13 install failed.'
+        Read-Host 'Press Enter to close'
         exit 2
     }
 }
 
 $pythonReady = KiemTra-LenhNative -FilePath $uvExe -Arguments @('python', 'find', '3.13')
 if (-not $pythonReady) {
-    Loi 'Python 3.13 vẫn chưa sẵn sàng sau khi cài.'
-    Read-Host 'Nhấn Enter để đóng cửa sổ'
+    Loi 'Python 3.13 is still unavailable after installation.'
+    Read-Host 'Press Enter to close'
     exit 2
 }
-ThanhCong 'Python 3.13 đã sẵn sàng.'
+ThanhCong 'Python 3.13 is ready.'
 
 $doctorReady = KiemTra-LenhNative -FilePath $uvExe -Arguments @('run', '--no-sync', 'wpclean', 'doctor')
 if (-not $doctorReady) {
-    CanhBao 'Môi trường dự án hoặc thư viện Python chưa đầy đủ.'
-    if (-not (Hoi-CoKhong 'Bạn có muốn cài/đồng bộ thư viện dự án tự động không?')) {
-        Loi 'Không thể tiếp tục khi thư viện dự án chưa đầy đủ.'
-        Read-Host 'Nhấn Enter để đóng cửa sổ'
+    CanhBao 'Project environment or Python dependencies are incomplete.'
+    if (-not (Hoi-CoKhong 'Install/sync project dependencies automatically?')) {
+        Loi 'Cannot continue while project dependencies are incomplete.'
+        Read-Host 'Press Enter to close'
         exit 2
     }
-    Buoc 'Đang cài và đồng bộ thư viện dự án'
+    Buoc 'Installing and syncing project dependencies'
     & $uvExe sync
     if ($LASTEXITCODE -ne 0) {
-        Loi 'Đồng bộ thư viện dự án thất bại.'
-        Read-Host 'Nhấn Enter để đóng cửa sổ'
+        Loi 'Dependency sync failed.'
+        Read-Host 'Press Enter to close'
         exit 2
     }
 }
 
 $doctorReady = KiemTra-LenhNative -FilePath $uvExe -Arguments @('run', '--no-sync', 'wpclean', 'doctor')
 if (-not $doctorReady) {
-    Loi 'Tự kiểm tra môi trường vẫn thất bại. Vui lòng liên hệ kỹ thuật.'
-    Read-Host 'Nhấn Enter để đóng cửa sổ'
+    Loi 'Environment self-check still failed.'
+    CanhBao "Startup log: $startupLog"
+    Read-Host 'Press Enter to close'
     exit 2
 }
-ThanhCong 'Môi trường chạy đã đầy đủ.'
+ThanhCong 'Runtime environment is ready.'
 
-Buoc 'BƯỚC 2 - Mở giao diện local'
-Write-Host 'Trình duyệt sẽ tự mở. Giữ cửa sổ này chạy trong lúc sử dụng giao diện.' -ForegroundColor Cyan
+Buoc 'STEP 2 - Start local GUI'
+Write-Host 'The browser will open automatically. Keep this window open while using the GUI.' -ForegroundColor Cyan
 
 # Production entry: parallel project support + journal + FTP diagnostics.
-$guiExit = Chay-GuiEntry -Module 'wpclean.gui_parallel_entry' -Label 'Khởi động giao diện nhiều dự án'
+$guiExit = Chay-GuiEntry -Module 'wpclean.gui_parallel_entry' -Label 'Starting multi-project GUI'
 if ($guiExit -eq 0) {
     exit 0
 }
 
-Loi "Giao diện nhiều dự án đã dừng với mã lỗi $guiExit."
-CanhBao "Chi tiết được lưu tại: $startupLog"
-CanhBao 'Đang tự chuyển sang giao diện stable để bạn vẫn có thể tiếp tục công việc.'
+Loi "Multi-project GUI stopped with exit code $guiExit."
+CanhBao "Startup log: $startupLog"
+CanhBao 'Trying the stable fallback GUI so work can continue.'
 
-$stableExit = Chay-GuiEntry -Module 'wpclean.gui_ftp_logging_entry' -Label 'Khởi động giao diện stable dự phòng'
+$stableExit = Chay-GuiEntry -Module 'wpclean.gui_ftp_logging_entry' -Label 'Starting stable fallback GUI'
 if ($stableExit -eq 0) {
     exit 0
 }
 
-Loi "Giao diện dự phòng cũng không khởi động được (mã lỗi $stableExit)."
-Loi "Hãy gửi file logs\gui-startup.log cho kỹ thuật."
-Read-Host 'Nhấn Enter để đóng cửa sổ'
+Loi "Fallback GUI also failed to start (exit code $stableExit)."
+Loi 'Send logs\gui-startup.log to technical support.'
+Read-Host 'Press Enter to close'
 exit $stableExit

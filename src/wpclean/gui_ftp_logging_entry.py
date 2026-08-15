@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import threading
 
 from . import gui_journal_entry  # noqa: F401 - activate normal GUI + persistent project journal
 from . import gui_server as server
@@ -9,9 +10,12 @@ from . import gui_ui
 
 _BASE_RENDER = gui_ui.render_app
 _BASE_TEST_CONNECTION = server.test_connection
+_FTP_TEST_LOCK = threading.Lock()
+_FTP_TEST_ACTIVE: set[str] = set()
 
 
 _FTP_TEST_JS = r'''
+const ftpTestsInFlight=new Set();
 function ftpTestClientLine(text){
   const out=qs('#terminalOutput');
   if(!out)return;
@@ -32,6 +36,11 @@ async function ftpRefreshProject(name){
   }catch(_e){return null}
 }
 testFtp=async function(name){
+  if(ftpTestsInFlight.has(name)){
+    toast('FTP đang được kiểm tra. Vui lòng chờ kết quả hiện tại.');
+    return;
+  }
+  ftpTestsInFlight.add(name);
   const p=(state.currentProject&&state.currentProject.name===name)?state.currentProject:null;
   const c=(p&&p.connection)||{};
   const host=c.host||(p&&p.host)||'FTP';
@@ -47,6 +56,8 @@ testFtp=async function(name){
     await ftpRefreshProject(name);
     toast(e.message,true);
     if(authError(e.message))openEditFtp(name,true);
+  }finally{
+    ftpTestsInFlight.delete(name);
   }
 }
 '''
@@ -96,12 +107,27 @@ def _diagnostic_job(name: str, profile):
     return job
 
 
+def _claim_ftp_test(name: str) -> bool:
+    with _FTP_TEST_LOCK:
+        if name in _FTP_TEST_ACTIVE:
+            return False
+        _FTP_TEST_ACTIVE.add(name)
+        return True
+
+
+def _release_ftp_test(name: str) -> None:
+    with _FTP_TEST_LOCK:
+        _FTP_TEST_ACTIVE.discard(name)
+
+
 def _test_connection_with_log(name: str):
     _profile_path, profile, _paths = server._profile_and_paths(name)
     job = _diagnostic_job(name, profile)
 
     if job.status == "running" and server.ACTIVE_PROJECT == name:
         raise RuntimeError("Dự án đang chạy workflow. Hãy chờ bước hiện tại dừng rồi kiểm tra FTP riêng.")
+    if not _claim_ftp_test(name):
+        raise RuntimeError("FTP TEST đang chạy cho dự án này. Vui lòng chờ kết quả hiện tại.")
 
     previous_stage = job.stage
     try:
@@ -116,6 +142,7 @@ def _test_connection_with_log(name: str):
         raise RuntimeError(message) from exc
     finally:
         job.stage = previous_stage
+        _release_ftp_test(name)
 
 
 gui_ui.render_app = _render_with_ftp_test_log

@@ -162,11 +162,15 @@ def test_journal_gui_has_three_project_tabs() -> None:
 def test_launcher_keeps_journal_without_fresh_install_chain() -> None:
     root = Path(__file__).resolve().parents[1]
     script = (root / "giaodien.ps1").read_text(encoding="utf-8-sig")
+    runtime_entry = (root / "src" / "wpclean" / "gui_runtime_entry.py").read_text(encoding="utf-8")
+    stable_runtime = (root / "src" / "wpclean" / "gui_stable_runtime_entry.py").read_text(encoding="utf-8")
     parallel_entry = (root / "src" / "wpclean" / "gui_parallel_entry.py").read_text(encoding="utf-8")
     ftp_entry = (root / "src" / "wpclean" / "gui_ftp_logging_entry.py").read_text(encoding="utf-8")
 
-    assert "Chay-GuiEntry -Module 'wpclean.gui_parallel_entry'" in script
-    assert "Chay-GuiEntry -Module 'wpclean.gui_ftp_logging_entry'" in script
+    assert "Run-GuiEntry -Module 'wpclean.gui_runtime_entry'" in script
+    assert "Run-GuiEntry -Module 'wpclean.gui_stable_runtime_entry'" in script
+    assert "gui_parallel_entry" in runtime_entry
+    assert "gui_ftp_logging_entry" in stable_runtime
     assert "gui_ftp_logging_entry" in parallel_entry
     assert "gui_journal_entry" in ftp_entry
     assert "gui_fresh_entry" not in parallel_entry

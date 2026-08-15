@@ -28,6 +28,8 @@ def _sandbox(tmp_path: Path, monkeypatch) -> str:
     monkeypatch.setattr(gui_server.wizard, "REPORTS_DIR", reports)
     gui_server.JOBS.clear()
     gui_server.ACTIVE_PROJECT = None
+    with ftp_gui._FTP_TEST_LOCK:
+        ftp_gui._FTP_TEST_ACTIVE.clear()
 
     project = gui_server.create_project(
         {
@@ -86,6 +88,22 @@ def test_manual_ftp_timeout_is_logged_with_friendly_message(tmp_path: Path, monk
     assert any(item.get("level") == "error" for item in activity)
 
 
+def test_duplicate_ftp_test_is_rejected_without_duplicate_log(tmp_path: Path, monkeypatch) -> None:
+    name = _sandbox(tmp_path, monkeypatch)
+    job = ftp_gui._diagnostic_job(name, gui_server._profile_and_paths(name)[1])
+
+    assert ftp_gui._claim_ftp_test(name) is True
+    try:
+        with pytest.raises(RuntimeError, match="FTP TEST đang chạy"):
+            ftp_gui._test_connection_with_log(name)
+    finally:
+        ftp_gui._release_ftp_test(name)
+
+    assert not any("bắt đầu kết nối" in line for line in job.logs)
+    activity = read_activity(tmp_path / "reports" / "ftp.example.test")
+    assert not any("bắt đầu kết nối" in str(item.get("message") or "") for item in activity)
+
+
 def test_ftp_error_messages_classify_common_failures() -> None:
     assert "TIMEOUT" in ftp_gui._ftp_error_message(TimeoutError("WinError 10060"), host="ftp.test", port=21)
     assert "LOGIN FAILED" in ftp_gui._ftp_error_message(RuntimeError("530 Login authentication failed"), host="ftp.test", port=21)
@@ -95,7 +113,9 @@ def test_ftp_error_messages_classify_common_failures() -> None:
 def test_production_gui_injects_immediate_ftp_test_terminal_feedback() -> None:
     html = ftp_gui._render_with_ftp_test_log("test-token")
     assert "ftpTestClientLine" in html
+    assert "ftpTestsInFlight" in html
     assert "FTP TEST · đang kết nối" in html
+    assert "FTP đang được kiểm tra. Vui lòng chờ kết quả hiện tại." in html
     assert "/test',{method:'POST'" in html
     assert "Cài WordPress mới</button>" not in html
 

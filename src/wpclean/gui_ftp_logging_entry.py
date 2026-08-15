@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from . import gui_no_fresh_entry  # noqa: F401 - activate production GUI with Fresh Install hidden
+from . import gui_journal_entry  # noqa: F401 - activate normal GUI + persistent project journal
 from . import gui_server as server
 from . import gui_ui
 

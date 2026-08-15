@@ -35,6 +35,10 @@ def append_activity(
     level: str = "info",
     session_id: str = "",
     secrets: Iterable[str] = (),
+    code: str = "",
+    title: str = "",
+    recovery: str = "",
+    technical: str = "",
 ) -> dict[str, Any] | None:
     text = _redact(str(message).strip(), secrets)
     if not text:
@@ -47,6 +51,14 @@ def append_activity(
         "session": str(session_id or ""),
         "message": text,
     }
+    if code:
+        item["code"] = str(code)
+    if title:
+        item["title"] = _redact(title, secrets)
+    if recovery:
+        item["recovery"] = _redact(recovery, secrets)
+    if technical:
+        item["technical"] = _redact(technical, secrets)
     path = Path(report_dir) / ACTIVITY_FILE
     with _LOCK:
         path.parent.mkdir(parents=True, exist_ok=True)

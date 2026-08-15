@@ -212,7 +212,7 @@ def _parallel_start_job(name: str, options: dict[str, Any]):
             title="Đang bắt đầu",
             message="Chuẩn bị workflow",
         )
-        job.started_at = datetime.now().isoformat(timespec="seconds")
+        job.started_at = datetime.now().astimezone().isoformat(timespec="seconds")
         job.touch()
         server.JOBS[name] = job
         _ACTIVE_TARGETS[target_key] = name

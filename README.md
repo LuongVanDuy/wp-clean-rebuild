@@ -1,10 +1,10 @@
 # WP Clean Rebuild
 
-Interactive CLI for rebuilding a compromised WordPress installation from trusted sources while preserving and triaging the database and uploads.
+Local Windows GUI and technical CLI for rebuilding a compromised WordPress installation from trusted sources while preserving and triaging the database and uploads.
 
 ## Current status
 
-V0.2 implements the safe backup/audit foundation:
+V0.2 implements the complete guarded recovery workflow:
 
 - Offline SQL malware scanning with explainable risk scores.
 - Offline uploads scanning, including PHP hidden behind media extensions.
@@ -14,20 +14,28 @@ V0.2 implements the safe backup/audit foundation:
 - Resume support via FTP REST.
 - MLSD directory discovery with legacy fallback.
 - Backup of uploads, themes, plugins, mu-plugins and forensic config files.
-- Destructive rebuild remains locked until verified backup/rollback requirements are complete.
+- Clean restore staging for the database and uploads.
+- Guarded destructive rebuild with explicit domain confirmation.
+- Safe DB-only resume after the destructive boundary.
+- Trusted WordPress core and WordPress.org plugin reinstall.
+- Flatsome/child-theme and MU-plugin safety gates.
+- Local Vietnamese GUI with persistent project history and multi-project execution.
+- Structured Vietnamese error codes, recovery guidance and live job health.
+
+Destructive rebuild remains locked until backup, verification, clean staging and preflight requirements pass.
 
 ## Windows — easiest setup
 
 You do **not** need to install Python manually.
 
 1. Pull/download the latest repository.
-2. Double-click `START.bat`.
-3. If `uv` is missing, setup shows the official download source and asks for confirmation.
+2. Double-click `WP-Clean-Rebuild.exe` (or `GIAODIEN.bat`).
+3. If `uv` is missing, the launcher shows the official download source and asks for confirmation.
 4. Press `Y` to install `uv`.
 5. Setup installs managed Python 3.13 and all project dependencies automatically.
-6. After setup, run commands through `wpclean.bat`.
+6. The browser opens the local operator dashboard. Keep the launcher window open.
 
-Example:
+Technical CLI example:
 
 ```powershell
 .\wpclean.bat doctor
@@ -57,6 +65,7 @@ python -m venv .venv
 source .venv/bin/activate
 
 pip install -e .
+pip install pytest
 ```
 
 ## Commands
@@ -131,7 +140,7 @@ FTP is only a filesystem protocol, so database export is intentionally separated
 
 The cleaned database will be imported only after offline triage.
 
-## Planned rebuild workflow
+## Rebuild workflow
 
 ```text
 connect
@@ -151,8 +160,12 @@ connect
   -> credential rotation checklist
 ```
 
+## GUI status and diagnostics
+
+The local dashboard shows stage progress, elapsed time, last engine signal, file counts, transfer speed and retry state. Failures use stable codes such as `FTP-AUTH-001` together with a Vietnamese explanation, recovery action and expandable technical details. Persistent history is stored under `reports/<host>/activity-log.jsonl` with configured secrets redacted.
+
 ## Safety model
 
-This project currently defaults to non-destructive operations. A future rebuild command must refuse to continue unless backup verification and rollback evidence pass first.
+Read-only and backup operations run first. Destructive rebuild refuses to continue unless backup verification, clean staging and preflight evidence pass. The operator must enter the exact project domain before crossing the destructive boundary.
 
 This tool is intended only for WordPress installations you own or are authorized to administer.

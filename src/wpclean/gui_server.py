@@ -21,6 +21,7 @@ import typer
 from .backup import verify_manifest, write_manifest
 from .clean_builder import build_clean_restore
 from .db_bridge import export_database_via_php_bridge
+from .gui_observability import classify_exception, error_payload, job_timing
 from .mu_plugin_restore import run_mu_plugin_stage
 from .rebuild_execute import execute_rebuild
 from .rebuild_preflight import run_rebuild_preflight
@@ -42,6 +43,7 @@ BACKUPS_DIR = PROJECT_ROOT / "backups"
 REPAIRS_DIR = PROJECT_ROOT / "repairs"
 TOKEN = secrets.token_urlsafe(32)
 PROJECT_RE = re.compile(r"^[a-zA-Z0-9._-]+$")
+ANSI_RE = re.compile(r"\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 
 
 @dataclass
@@ -53,14 +55,31 @@ class GuiJob:
     message: str = ""
     percent: int = 0
     current: str = ""
+    completed_items: int = 0
+    total_items: int = 0
+    bytes_completed: int = 0
+    bytes_total: int = 0
+    bytes_per_second: float = 0.0
+    failed_items: int = 0
+    retry_attempt: int = 0
+    retry_limit: int = 0
+    progress_phase: str = ""
+    progress_unit: str = "file"
     error: str = ""
+    error_code: str = ""
+    error_title: str = ""
+    recovery: str = ""
+    retryable: bool = True
+    technical_error: str = ""
     decision: dict[str, Any] | None = None
     logs: list[str] = field(default_factory=list)
     started_at: str = ""
     updated_at: str = ""
+    sequence: int = 0
 
     def touch(self) -> None:
-        self.updated_at = datetime.now().isoformat(timespec="seconds")
+        self.updated_at = datetime.now().astimezone().isoformat(timespec="seconds")
+        self.sequence += 1
 
     def set(
         self,
@@ -72,10 +91,26 @@ class GuiJob:
         percent: int | None = None,
         current: str | None = None,
         error: str | None = None,
+        error_code: str | None = None,
+        error_title: str | None = None,
+        recovery: str | None = None,
+        retryable: bool | None = None,
+        technical_error: str | None = None,
         decision: dict[str, Any] | None | object = ...,
     ) -> None:
         if status is not None:
             self.status = status
+        if stage is not None and stage != self.stage:
+            self.completed_items = 0
+            self.total_items = 0
+            self.bytes_completed = 0
+            self.bytes_total = 0
+            self.bytes_per_second = 0.0
+            self.failed_items = 0
+            self.retry_attempt = 0
+            self.retry_limit = 0
+            self.progress_phase = ""
+            self.progress_unit = "file"
         if stage is not None:
             self.stage = stage
         if title is not None:
@@ -88,21 +123,107 @@ class GuiJob:
             self.current = current
         if error is not None:
             self.error = error
+        if error_code is not None:
+            self.error_code = error_code
+        if error_title is not None:
+            self.error_title = error_title
+        if recovery is not None:
+            self.recovery = recovery
+        if retryable is not None:
+            self.retryable = bool(retryable)
+        if technical_error is not None:
+            self.technical_error = technical_error
         if decision is not ...:
             self.decision = decision  # type: ignore[assignment]
         self.touch()
 
-    def log(self, text: str) -> None:
-        text = str(text).strip()
-        if not text:
+    def log(
+        self,
+        text: str,
+        *,
+        level: str = "",
+        code: str = "",
+        title: str = "",
+        recovery: str = "",
+        technical: str = "",
+    ) -> None:
+        """Store concise session output and persist it when a journal is attached."""
+
+        raw_text = str(text)
+        secrets_to_hide = getattr(self, "_journal_secrets", ())
+        for secret in secrets_to_hide:
+            value = str(secret or "")
+            if len(value) >= 3:
+                raw_text = raw_text.replace(value, "***")
+        clean = ANSI_RE.sub("", raw_text).replace("\r", "\n").strip()
+        if not clean:
             return
-        self.logs.append(text)
-        if len(self.logs) > 80:
-            self.logs = self.logs[-80:]
+        if clean.startswith("Traceback (most recent call last):"):
+            trace_lines = [line.strip() for line in clean.splitlines() if line.strip()]
+            clean = "ERROR | " + (trace_lines[-1] if trace_lines else "Lỗi Python không xác định")
+
+        journal_dir = getattr(self, "_journal_dir", None)
+        event_level = level or ("error" if clean.startswith("ERROR |") else "info")
+        for raw in clean.splitlines():
+            line = raw.strip()
+            if not line:
+                continue
+            display = line
+            if not re.match(r"^\[\d{2}:\d{2}:\d{2}\]", display):
+                display = f"[{datetime.now().strftime('%H:%M:%S')}] {display}"
+            self.logs.append(display)
+            if journal_dir is not None:
+                from .project_journal import append_activity
+
+                append_activity(
+                    journal_dir,
+                    project=self.project,
+                    stage=self.stage,
+                    level=event_level,
+                    session_id=getattr(self, "_journal_session", ""),
+                    message=line,
+                    secrets=secrets_to_hide,
+                    code=code,
+                    title=title,
+                    recovery=recovery,
+                    technical=technical,
+                )
+        if len(self.logs) > 500:
+            self.logs = self.logs[-500:]
         self.touch()
 
+    def fail(self, exc: BaseException, *, technical: str = "") -> None:
+        info = classify_exception(exc, stage=self.stage)
+        detail = technical or info.technical
+        message = info.message
+        for secret in getattr(self, "_journal_secrets", ()):
+            value = str(secret or "")
+            if len(value) >= 3:
+                detail = detail.replace(value, "***")
+                message = message.replace(value, "***")
+        self.log(
+            f"ERROR | [{info.code}] {info.title} · {message}",
+            level="error",
+            code=info.code,
+            title=info.title,
+            recovery=info.recovery,
+            technical=detail,
+        )
+        self.set(
+            status="error",
+            title=info.title,
+            message=message,
+            error=message,
+            error_code=info.code,
+            error_title=info.title,
+            recovery=info.recovery,
+            retryable=info.retryable,
+            technical_error=detail,
+            decision=None,
+        )
+
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "project": self.project,
             "status": self.status,
             "stage": self.stage,
@@ -110,12 +231,50 @@ class GuiJob:
             "message": self.message,
             "percent": self.percent,
             "current": self.current,
+            "progress": {
+                "completed": self.completed_items,
+                "total": self.total_items,
+                "bytesCompleted": self.bytes_completed,
+                "bytesTotal": self.bytes_total,
+                "bytesPerSecond": self.bytes_per_second,
+                "failed": self.failed_items,
+                "retryAttempt": self.retry_attempt,
+                "retryLimit": self.retry_limit,
+                "phase": self.progress_phase,
+                "unit": self.progress_unit,
+            },
             "error": self.error,
+            "errorCode": self.error_code,
+            "errorTitle": self.error_title,
+            "recovery": self.recovery,
+            "retryable": self.retryable,
+            "technicalError": self.technical_error,
             "decision": self.decision,
-            "logs": self.logs[-30:],
+            "logs": self.logs[-300:],
             "startedAt": self.started_at,
             "updatedAt": self.updated_at,
+            "sequence": self.sequence,
         }
+        payload.update(
+            job_timing(
+                started_at=self.started_at,
+                updated_at=self.updated_at,
+                status=self.status,
+            )
+        )
+        payload["errorInfo"] = (
+            {
+                "code": self.error_code,
+                "title": self.error_title or self.title,
+                "message": self.error,
+                "recovery": self.recovery,
+                "retryable": self.retryable,
+                "technical": self.technical_error,
+            }
+            if self.error or self.error_code
+            else None
+        )
+        return payload
 
 
 JOBS: dict[str, GuiJob] = {}
@@ -303,16 +462,111 @@ def _confirm_answers(answers: list[bool]):
         typer.confirm = original
 
 
+_PROGRESS_SIDEBAND_PHASES = {"ftp_reconnect", "permission_recovery"}
+_REBUILD_PROGRESS_FIXED = {
+    "verify_original": 1,
+    "verify_clean": 3,
+    "download_core": 5,
+    "extract_core": 8,
+    "destructive_boundary": 10,
+    "wipe_inventory": 11,
+    "wipe_inventory_complete": 12,
+    "upload_wp_config": 59,
+    "upload_htaccess": 60,
+    "db_import_upload": 84,
+    "db_import_execute": 90,
+    "db_import_cleanup": 97,
+    "complete": 100,
+}
+_REBUILD_PROGRESS_RANGES = {
+    "wipe": (12, 32),
+    "upload_core": (32, 58),
+    "upload_uploads": (60, 82),
+    "upload_plugins": (60, 82),
+    "upload_themes": (60, 82),
+    "upload_mu-plugins": (60, 82),
+}
+
+
+def _rebuild_progress_percent(phase: str, completed: int, total: int, current: int) -> int:
+    if phase in _REBUILD_PROGRESS_FIXED:
+        return _REBUILD_PROGRESS_FIXED[phase]
+    bounds = _REBUILD_PROGRESS_RANGES.get(phase)
+    if bounds is None:
+        return current
+    start, end = bounds
+    ratio = min(1.0, completed / total) if total > 0 else 0.0
+    return round(start + ((end - start) * ratio))
+
+
 def _progress(job: GuiJob, event: dict[str, Any]) -> None:
     phase = str(event.get("phase") or "")
-    current = str(event.get("current") or event.get("stage") or "")
-    completed = int(event.get("files_completed") or event.get("completed") or 0)
-    total = int(event.get("files_total") or event.get("total") or 0)
-    percent = int((completed / total) * 100) if total else job.percent
+    current = str(
+        event.get("current")
+        or event.get("current_file")
+        or event.get("current_dir")
+        or event.get("remote_path")
+        or event.get("file")
+        or event.get("path")
+        or event.get("url")
+        or event.get("stage")
+        or ""
+    )
+
+    if phase and phase not in _PROGRESS_SIDEBAND_PHASES and phase != job.progress_phase:
+        job.progress_phase = phase
+        job.completed_items = 0
+        job.total_items = 0
+        job.bytes_completed = 0
+        job.bytes_total = 0
+        job.bytes_per_second = 0.0
+        job.failed_items = 0
+        job.retry_attempt = 0
+        job.retry_limit = 0
+        job.progress_unit = "file"
+
+    def number(*keys: str, fallback: int = 0) -> int:
+        for key in keys:
+            value = event.get(key)
+            if value is not None:
+                try:
+                    return max(0, int(value))
+                except (TypeError, ValueError):
+                    continue
+        return max(0, int(fallback))
+
+    completed = number(
+        "items_completed",
+        "files_completed",
+        "items_discovered",
+        "completed",
+        fallback=job.completed_items,
+    )
+    total = number("items_total", "files_total", "total", fallback=job.total_items)
+    bytes_completed = number("bytes_downloaded", "bytes_completed", fallback=job.bytes_completed)
+    bytes_total = number("bytes_total", fallback=job.bytes_total)
+    failed = number("files_failed", fallback=job.failed_items)
+    attempt = number("attempt", fallback=0)
+    max_attempts = number("max_attempts", fallback=0)
+    if job.stage == "rebuild" and phase:
+        percent = _rebuild_progress_percent(phase, completed, total, job.percent)
+    elif total:
+        percent = int((completed / total) * 100)
+    elif bytes_total:
+        percent = int((bytes_completed / bytes_total) * 100)
+    else:
+        percent = job.percent
     labels = {
         "discover": "Đang kiểm kê file",
+        "discover_start": "Bắt đầu kiểm kê file",
+        "discover_dir": "Đang đọc thư mục trên hosting",
+        "discover_complete": "Đã kiểm kê xong file",
         "transfer": "Đang tải backup",
+        "retry": "Kết nối tạm lỗi, đang thử lại",
+        "file_failed": "Một file chưa tải được",
         "verify": "Đang xác minh SHA-256",
+        "stage": "Đang chuyển bước backup",
+        "config_file": "Đang backup file cấu hình",
         "upload_bridge": "Đang chuẩn bị backup database",
         "request_dump": "Đang xuất database",
         "download": "Đang tải database",
@@ -322,15 +576,37 @@ def _progress(job: GuiJob, event: dict[str, Any]) -> None:
         "download_core": "Đang tải WordPress sạch",
         "extract_core": "Đang kiểm tra WordPress",
         "destructive_boundary": "Bắt đầu rebuild website",
+        "wipe_inventory": "Đang kiểm kê code cũ trước khi xóa",
+        "wipe_inventory_complete": "Đã kiểm kê xong, chuẩn bị xóa code cũ",
         "wipe": "Đang xóa code cũ",
+        "ftp_reconnect": "FTP tạm ngắt, đang kết nối lại",
+        "permission_recovery": "Đang xử lý quyền file trên hosting",
         "db_import_upload": "Đang chuẩn bị import database",
         "db_import_execute": "Đang import database sạch",
         "db_import_cleanup": "Đang dọn file import tạm",
         "upload_mu_plugin": "Đang upload MU-plugin sạch",
+        "inventory": "Đang kiểm kê website hiện tại",
+        "inventory_start": "Bắt đầu kiểm kê website",
+        "verify_remote_root": "Đang xác minh đúng WordPress root",
+        "complete": "Đã hoàn tất tác vụ hiện tại",
     }
     if phase.startswith("upload_") and phase not in labels:
         labels[phase] = "Đang upload dữ liệu sạch"
     message = labels.get(phase, phase.replace("_", " ") if phase else job.message)
+    if attempt:
+        message += f" · lần {attempt}/{max_attempts or '?'}"
+    job.completed_items = completed
+    job.total_items = total
+    job.bytes_completed = bytes_completed
+    job.bytes_total = bytes_total
+    try:
+        job.bytes_per_second = max(0.0, float(event.get("bytes_per_second") or job.bytes_per_second))
+    except (TypeError, ValueError):
+        pass
+    job.failed_items = failed
+    job.retry_attempt = attempt
+    job.retry_limit = max_attempts
+    job.progress_unit = str(event.get("unit") or job.progress_unit or "file")
     job.set(message=message, percent=percent, current=current)
 
 
@@ -509,7 +785,7 @@ def _run_pipeline(name: str, options: dict[str, Any], job: GuiJob) -> None:
     try:
         _profile_path, profile, paths = _profile_and_paths(name)
         transport = _transport(profile)
-        job.started_at = datetime.now().isoformat(timespec="seconds")
+        job.started_at = datetime.now().astimezone().isoformat(timespec="seconds")
         job.set(status="running", title="Đang chuẩn bị", message="Đang kiểm tra kết nối hosting", decision=None)
         cwd = transport.test_connection()
         if not transport.directory_exists(profile.remote_path):
@@ -678,14 +954,7 @@ def _run_pipeline(name: str, options: dict[str, Any], job: GuiJob) -> None:
     except wizard.TamDungQuyTrinh as exc:
         job.set(status="paused", title="Tạm dừng", message=str(exc), error="", decision=None)
     except Exception as exc:
-        job.log(traceback.format_exc(limit=5))
-        job.set(
-            status="error",
-            title="Quy trình dừng do lỗi",
-            message="Không chạy lại bước phá hủy bằng tay. Có thể bấm Thử lại sau khi xử lý nguyên nhân.",
-            error=f"{type(exc).__name__}: {exc}",
-            decision=None,
-        )
+        job.fail(exc, technical=traceback.format_exc(limit=8))
     finally:
         with JOBS_LOCK:
             ACTIVE_PROJECT = None
@@ -702,7 +971,7 @@ def start_job(name: str, options: dict[str, Any]) -> GuiJob:
             raise RuntimeError(f"Đang xử lý dự án {ACTIVE_PROJECT}. Hãy chờ stage hiện tại hoàn tất.")
         ACTIVE_PROJECT = name
         job = GuiJob(project=name, status="running", title="Đang bắt đầu", message="Chuẩn bị workflow")
-        job.started_at = datetime.now().isoformat(timespec="seconds")
+        job.started_at = datetime.now().astimezone().isoformat(timespec="seconds")
         job.touch()
         JOBS[name] = job
     thread = threading.Thread(target=_run_pipeline, args=(name, options, job), daemon=True, name=f"wpclean-gui-{name}")
@@ -808,13 +1077,23 @@ class GuiHandler(BaseHTTPRequestHandler):
                 return
             _send_json(self, {"error": "Không tìm thấy endpoint."}, 404)
         except Exception as exc:
-            _send_json(self, {"error": f"{type(exc).__name__}: {exc}"}, 400)
+            _send_json(self, error_payload(exc), 400)
 
     def do_POST(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
         path = parsed.path.rstrip("/") or "/"
         if not self._authorized():
-            _send_json(self, {"error": "Phiên GUI không hợp lệ. Hãy refresh trang."}, 403)
+            _send_json(
+                self,
+                {
+                    "error": "Phiên GUI đã hết hiệu lực. Hãy tải lại trang.",
+                    "errorCode": "GUI-AUTH-001",
+                    "errorTitle": "Phiên GUI không hợp lệ",
+                    "recovery": "Refresh trang để nhận phiên local mới.",
+                    "retryable": True,
+                },
+                403,
+            )
             return
         try:
             body = _read_body(self)
@@ -842,7 +1121,7 @@ class GuiHandler(BaseHTTPRequestHandler):
                 return
             _send_json(self, {"error": "Không tìm thấy endpoint."}, 404)
         except Exception as exc:
-            _send_json(self, {"error": f"{type(exc).__name__}: {exc}"}, 400)
+            _send_json(self, error_payload(exc), 400)
 
 
 def _bind_server(host: str = "127.0.0.1", preferred: int = 8765) -> tuple[ThreadingHTTPServer, int]:

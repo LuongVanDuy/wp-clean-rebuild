@@ -93,6 +93,11 @@ def test_wipe_reconnects_after_winerror_10054_and_continues() -> None:
     assert state.deleted is True
     assert len(transport.clients) >= 2
     assert any(event.get("phase") == "ftp_reconnect" for event in events)
+    assert any(event.get("phase") == "wipe_inventory_complete" for event in events)
+    wipe = next(event for event in events if event.get("phase") == "wipe")
+    assert wipe["items_completed"] == 1
+    assert wipe["items_total"] == 1
+    assert wipe["unit"] == "mục"
 
 
 def test_rebuild_upload_reconnects_and_restarts_file_from_beginning(tmp_path: Path) -> None:

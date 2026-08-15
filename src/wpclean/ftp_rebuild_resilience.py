@@ -254,6 +254,9 @@ def wipe_remote_root_with_reconnect(
     deleted_files = 0
     deleted_dirs = 0
     preserved: list[str] = []
+    files_to_delete: list[str] = []
+    dirs_to_delete: list[str] = []
+    total_items = 0
 
     def emit(current: str) -> None:
         if progress:
@@ -262,6 +265,9 @@ def wipe_remote_root_with_reconnect(
                     "phase": "wipe",
                     "deleted_files": deleted_files,
                     "deleted_dirs": deleted_dirs,
+                    "items_completed": deleted_files + deleted_dirs,
+                    "items_total": total_items,
+                    "unit": "mục",
                     "current": current,
                 }
             )
@@ -301,8 +307,7 @@ def wipe_remote_root_with_reconnect(
             f"cần File Manager/SSH/hosting xử lý ownership hoặc ACL. Lỗi cuối: {last_exc}"
         )
 
-    def remove_tree(path: str, *, root: bool = False) -> None:
-        nonlocal deleted_files, deleted_dirs
+    def inventory_tree(path: str, *, root: bool = False) -> None:
         for name, facts in list_dir(path):
             if name in {".", ".."}:
                 continue
@@ -313,17 +318,55 @@ def wipe_remote_root_with_reconnect(
             kind = (facts.get("type") or "").lower()
             if kind in {"dir", "cdir", "pdir"}:
                 if kind == "dir":
-                    remove_tree(child)
-                    _remove_dir(session, child, progress=progress)
-                    deleted_dirs += 1
-                    emit(child)
+                    inventory_tree(child)
+                    # Post-order guarantees child directories are removed first.
+                    dirs_to_delete.append(child)
                 continue
+            files_to_delete.append(child)
+            discovered = len(files_to_delete) + len(dirs_to_delete)
+            if progress and (discovered == 1 or discovered % 25 == 0):
+                progress(
+                    {
+                        "phase": "wipe_inventory",
+                        "items_discovered": discovered,
+                        "unit": "mục",
+                        "current": child,
+                    }
+                )
+
+    try:
+        if progress:
+            progress(
+                {
+                    "phase": "wipe_inventory",
+                    "items_discovered": 0,
+                    "unit": "mục",
+                    "current": remote_root,
+                }
+            )
+        inventory_tree(remote_root, root=True)
+        total_items = len(files_to_delete) + len(dirs_to_delete)
+        if progress:
+            progress(
+                {
+                    "phase": "wipe_inventory_complete",
+                    "items_completed": 0,
+                    "items_total": total_items,
+                    "files_total": len(files_to_delete),
+                    "dirs_total": len(dirs_to_delete),
+                    "unit": "mục",
+                    "current": remote_root,
+                }
+            )
+
+        for child in files_to_delete:
             _delete_file(session, child, progress=progress)
             deleted_files += 1
             emit(child)
-
-    try:
-        remove_tree(remote_root, root=True)
+        for child in dirs_to_delete:
+            _remove_dir(session, child, progress=progress)
+            deleted_dirs += 1
+            emit(child)
         remaining = [
             name
             for name, _facts in list_dir(remote_root)

@@ -1,10 +1,13 @@
 .venv/
+.pytest_cache/
 __pycache__/
 *.py[cod]
 *.egg-info/
 .env
 backups/
 reports/
+repairs/
+logs/
 evidence/
 *.sql
 

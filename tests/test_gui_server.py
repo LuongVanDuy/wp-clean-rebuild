@@ -8,8 +8,8 @@ from pathlib import Path
 from typer.testing import CliRunner
 
 from wpclean import gui_entry  # activates GUI runtime patches
+from wpclean import gui_journal_entry
 from wpclean import gui_server
-from wpclean.gui_ui import render_app
 from wpclean.rebuild_entry import app
 
 
@@ -35,7 +35,7 @@ def _sandbox_gui(tmp_path: Path, monkeypatch) -> None:
 
 
 def test_gui_html_is_self_contained_vietnamese_and_readable() -> None:
-    html = render_app("test-token")
+    html = gui_journal_entry._render_app("test-token")
 
     assert "WP Clean Rebuild" in html
     assert "Dự án WordPress" in html
@@ -52,14 +52,31 @@ def test_gui_html_is_self_contained_vietnamese_and_readable() -> None:
     assert "field input,.field select{font-size:16px}" in html
     assert "drawer{width:min(1380px,98vw)}" in html
     assert "detail-layout{display:grid" in html
-    assert "LOG XỬ LÝ" in html
+    assert "PROJECT LOG" in html
     assert "terminalOutput" in html
+    assert "systemHealth" in html
+    assert "errorInfo" in html
+    assert "Tín hiệu cuối" in html
+    assert "(done+running)/p.steps.length" in html
+    assert "Chi tiết kỹ thuật" in html
+    assert 'aria-live="polite"' in html
     assert 'type="password"' not in html
     assert "test-token" in html
     assert "https://cdn" not in html
     assert "unpkg.com" not in html
-    assert "linear-gradient" not in html
-    assert "backdrop-filter" not in html
+    assert "wpclean-coder-style" in html
+    assert "--mono:" in html
+    assert ".field.third{grid-column:span 2}" in html
+    assert "height:44px;min-height:44px" in html
+    assert 'class="field third"><label for="e_port"' in html
+    assert "running?'Đang chạy':'Tiếp theo'" in html
+    assert '<aside class="sidebar">' not in html
+    assert "Xóa dự án chỉ xóa dữ liệu local" not in html
+    assert "Log phiên hiện tại ở đây" not in html
+    assert 'id="confirmRebuild"' not in html
+    assert "Nhập chính xác:" not in html
+    assert "PROJECT LOG" in html
+    assert "Tự cuộn:" in html
 
     weights = [int(item) for item in re.findall(r"font-weight:(\d+)", html)]
     assert weights

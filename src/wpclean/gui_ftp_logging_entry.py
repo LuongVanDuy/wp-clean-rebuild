@@ -4,13 +4,13 @@ from datetime import datetime
 import threading
 
 from . import gui_journal_entry  # noqa: F401 - activate normal GUI + persistent project journal
+from .gui_observability import OperationError, classify_exception
 from . import gui_server as server
 from . import gui_ui
 
 
 _BASE_RENDER = gui_ui.render_app
 _BASE_TEST_CONNECTION = server.test_connection
-_BASE_JOB_LOG = server.GuiJob.log
 _FTP_TEST_LOCK = threading.Lock()
 _FTP_TEST_ACTIVE: set[str] = set()
 
@@ -42,6 +42,7 @@ testFtp=async function(name){
     return;
   }
   ftpTestsInFlight.add(name);
+  const done=beginBusy('Đang kiểm tra...');
   const p=(state.currentProject&&state.currentProject.name===name)?state.currentProject:null;
   const c=(p&&p.connection)||{};
   const host=c.host||(p&&p.host)||'FTP';
@@ -56,9 +57,10 @@ testFtp=async function(name){
   }catch(e){
     await ftpRefreshProject(name);
     toast(e.message,true);
-    if(authError(e.message))openEditFtp(name,true);
+    if(authError(e.message)||e.code==='FTP-AUTH-001')openEditFtp(name,true);
   }finally{
     ftpTestsInFlight.delete(name);
+    done();
   }
 }
 '''
@@ -70,40 +72,13 @@ def _render_with_ftp_test_log(token: str) -> str:
 
 
 def _concise_job_log(self, text: str) -> None:
-    """Keep operator GUI logs concise while preserving the actionable error line."""
-    raw = str(text)
-    if raw.lstrip().startswith("Traceback (most recent call last):"):
-        lines = [line.strip() for line in raw.splitlines() if line.strip()]
-        final = lines[-1] if lines else "Lỗi Python không xác định"
-        _BASE_JOB_LOG(self, f"ERROR | {final}")
-        return
-    _BASE_JOB_LOG(self, text)
+    """Compatibility helper; GuiJob now owns concise, structured logging."""
+    self.log(text)
 
 
 def _ftp_error_message(exc: Exception, *, host: str, port: int) -> str:
-    raw = f"{type(exc).__name__}: {exc}"
-    text = raw.lower()
-    endpoint = f"{host}:{port}"
-
-    if "10060" in text or "timed out" in text or "timeout" in text:
-        return (
-            f"FTP TEST · TIMEOUT · không nhận phản hồi từ {endpoint}. "
-            "Kiểm tra FTP host, port, firewall hoặc IP đang bị hosting chặn."
-        )
-    if "530" in text or "login authentication failed" in text or "authentication failed" in text or "not logged in" in text:
-        return (
-            f"FTP TEST · LOGIN FAILED · {endpoint} đã phản hồi nhưng từ chối tài khoản/mật khẩu FTP."
-        )
-    if "10061" in text or "connection refused" in text or "actively refused" in text:
-        return (
-            f"FTP TEST · CONNECTION REFUSED · {endpoint} từ chối kết nối. "
-            "Kiểm tra port hoặc dịch vụ FTP trên hosting."
-        )
-    if "getaddrinfo" in text or "name or service not known" in text or "nodename nor servname" in text:
-        return f"FTP TEST · DNS ERROR · không phân giải được FTP host {host}."
-    if "ssl" in text or "tls" in text or "certificate" in text:
-        return f"FTP TEST · TLS ERROR · không thiết lập được kết nối FTPS tới {endpoint}: {exc}"
-    return f"FTP TEST · FAIL · {raw}"
+    info = classify_exception(exc, stage="ftp-test")
+    return f"{info.operator_line()} · Hướng xử lý: {info.recovery} · Đích: {host}:{port}"
 
 
 def _diagnostic_job(name: str, profile):
@@ -141,24 +116,35 @@ def _test_connection_with_log(name: str):
     if not _claim_ftp_test(name):
         raise RuntimeError("FTP TEST đang chạy cho dự án này. Vui lòng chờ kết quả hiện tại.")
 
-    previous_stage = job.stage
     try:
-        job.stage = "ftp-test"
+        job.started_at = datetime.now().astimezone().isoformat(timespec="seconds")
+        job.set(
+            status="running",
+            stage="ftp-test",
+            title="Kiểm tra kết nối FTP",
+            message=f"Đang kết nối {profile.host}:{profile.port}",
+            percent=10,
+            current=profile.remote_path,
+            error="",
+            error_code="",
+            error_title="",
+            recovery="",
+            technical_error="",
+        )
         job.log(f"FTP TEST · bắt đầu kết nối {profile.host}:{profile.port} · {profile.protocol.upper()}")
         result = _BASE_TEST_CONNECTION(name)
         job.log(f"FTP TEST · PASS · remote {profile.remote_path} · cwd {result.get('cwd') or '/'}")
+        job.set(status="idle", title="Kiểm tra FTP thành công", message="Hosting và remote path đều truy cập được.", percent=100)
         return result
     except Exception as exc:
-        message = _ftp_error_message(exc, host=profile.host, port=profile.port)
-        job.log("ERROR | " + message)
-        raise RuntimeError(message) from exc
+        info = classify_exception(exc, stage="ftp-test")
+        job.fail(OperationError(info))
+        raise OperationError(info) from exc
     finally:
-        job.stage = previous_stage
         _release_ftp_test(name)
 
 
 gui_ui.render_app = _render_with_ftp_test_log
-server.GuiJob.log = _concise_job_log
 server.test_connection = _test_connection_with_log
 
 

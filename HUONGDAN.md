@@ -90,6 +90,39 @@ sites\<ten-du-an>.json
 
 Dashboard tự đọc backup/report/state và hiển thị phần trăm tiến độ cùng bước tiếp theo.
 
+## Đọc trạng thái và log trên GUI
+
+Khi một bước đang chạy, dashboard hiển thị:
+
+```text
+thời gian đã chạy
+→ tín hiệu cuối từ engine
+→ số file hoàn tất / tổng số file
+→ tốc độ truyền hiện tại
+→ file hoặc đường dẫn đang xử lý
+```
+
+Các trạng thái có ý nghĩa khác nhau:
+
+```text
+Đang hoạt động      = engine vừa phát tín hiệu
+Đang chờ phản hồi   = đang chờ hosting/network trả lời
+Phản hồi chậm       = chưa có tín hiệu mới trong hơn một phút
+Có dấu hiệu bị treo = chưa có tín hiệu mới trong hơn ba phút
+```
+
+Nếu có lỗi, GUI hiển thị mã ổn định, giải thích tiếng Việt và cách xử lý. Ví dụ:
+
+```text
+FTP-AUTH-001       = sai tài khoản hoặc mật khẩu FTP
+FTP-TIMEOUT-001    = hosting không phản hồi
+FTP-PERM-001       = hosting từ chối quyền file
+BACKUP-INTEGRITY-001 = backup/manifest không còn nguyên vẹn
+DB-IMPORT-001      = database chưa import hoàn tất
+```
+
+Nhấn **Chi tiết kỹ thuật** khi cần gửi lỗi cho kỹ thuật. Không chạy lại wipe bằng tay; chỉ dùng nút thử lại đúng bước hoặc DB-only resume do GUI cung cấp.
+
 Ví dụ:
 
 ```text

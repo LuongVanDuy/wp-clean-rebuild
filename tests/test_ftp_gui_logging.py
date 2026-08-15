@@ -78,13 +78,15 @@ def test_manual_ftp_timeout_is_logged_with_friendly_message(tmp_path: Path, monk
 
     monkeypatch.setattr(ftp_gui, "_BASE_TEST_CONNECTION", timeout)
 
-    with pytest.raises(RuntimeError, match="FTP TEST · TIMEOUT"):
+    with pytest.raises(RuntimeError, match="FTP-TIMEOUT-001"):
         ftp_gui._test_connection_with_log(name)
 
     job = gui_server.JOBS[name]
-    assert any("FTP TEST · TIMEOUT" in line for line in job.logs)
+    assert job.error_code == "FTP-TIMEOUT-001"
+    assert any("FTP-TIMEOUT-001" in line for line in job.logs)
     activity = read_activity(tmp_path / "reports" / "ftp.example.test")
-    assert any("FTP TEST · TIMEOUT" in str(item.get("message") or "") for item in activity)
+    assert any(item.get("code") == "FTP-TIMEOUT-001" for item in activity)
+    assert any(item.get("recovery") for item in activity if item.get("code") == "FTP-TIMEOUT-001")
     assert any(item.get("level") == "error" for item in activity)
 
 
@@ -105,9 +107,9 @@ def test_duplicate_ftp_test_is_rejected_without_duplicate_log(tmp_path: Path, mo
 
 
 def test_ftp_error_messages_classify_common_failures() -> None:
-    assert "TIMEOUT" in ftp_gui._ftp_error_message(TimeoutError("WinError 10060"), host="ftp.test", port=21)
-    assert "LOGIN FAILED" in ftp_gui._ftp_error_message(RuntimeError("530 Login authentication failed"), host="ftp.test", port=21)
-    assert "CONNECTION REFUSED" in ftp_gui._ftp_error_message(ConnectionRefusedError("WinError 10061"), host="ftp.test", port=21)
+    assert "FTP-TIMEOUT-001" in ftp_gui._ftp_error_message(TimeoutError("WinError 10060"), host="ftp.test", port=21)
+    assert "FTP-AUTH-001" in ftp_gui._ftp_error_message(RuntimeError("530 Login authentication failed"), host="ftp.test", port=21)
+    assert "FTP-CONNECT-001" in ftp_gui._ftp_error_message(ConnectionRefusedError("WinError 10061"), host="ftp.test", port=21)
 
 
 def test_production_gui_injects_immediate_ftp_test_terminal_feedback() -> None:

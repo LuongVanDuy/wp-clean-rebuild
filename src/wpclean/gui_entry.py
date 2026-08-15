@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 from contextlib import redirect_stderr, redirect_stdout
-from datetime import datetime
 from pathlib import Path
 from typing import Any
-import re
 import sys
 
 from . import gui_server as server
@@ -17,8 +15,7 @@ _ORIGINAL_CREATE_PROJECT = server.create_project
 _ORIGINAL_RENDER_APP = gui_ui.render_app
 _ORIGINAL_RUN_PIPELINE = server._run_pipeline
 _ORIGINAL_PROGRESS = server._progress
-_ORIGINAL_JOB_TO_DICT = server.GuiJob.to_dict
-_ANSI_RE = re.compile(r"\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
+_ANSI_RE = server.ANSI_RE
 
 
 _READABILITY_CSS = r'''<style id="wpclean-readability">
@@ -35,23 +32,34 @@ html,body{font-size:16px;line-height:1.45}
 .action-card h3{font-size:17px}.action-card p{font-size:15px}.confirm-input{font-size:15px}
 .check b{font-size:15px}.check span{font-size:13px}.job h3{font-size:16px}.job p{font-size:14px}.jobcur{font-size:13px}
 .errorbox{font-size:13px}.job .logs{display:none}.foot-danger p{font-size:13px}
+.system-health{display:inline-flex;align-items:center;gap:7px;margin-right:6px;color:#64748b;font-size:13px}.system-health-dot{width:8px;height:8px;border-radius:50%;background:#16a34a;box-shadow:0 0 0 3px #dcfce7}.system-health.offline{color:#b42332}.system-health.offline .system-health-dot{background:#dc2626;box-shadow:0 0 0 3px #fee2e2}
+.btn:focus-visible,.xbtn:focus-visible,.open-btn:focus-visible,.navbtn:focus-visible,.detail-tab:focus-visible,input:focus-visible,select:focus-visible{outline:3px solid rgba(37,99,235,.28);outline-offset:2px}.btn[aria-busy="true"]{cursor:wait;opacity:.72}
+.job-health{display:flex;align-items:center;gap:7px;font-size:13px;font-weight:600;color:#475569}.job-health-dot{width:9px;height:9px;border-radius:50%;background:#64748b}.job-health.active .job-health-dot{background:#16a34a;box-shadow:0 0 0 4px #dcfce7;animation:wpclean-pulse 1.8s ease-out infinite}.job-health.waiting .job-health-dot,.job-health.slow .job-health-dot{background:#d97706;box-shadow:0 0 0 4px #fef3c7}.job-health.stalled .job-health-dot,.job-health.error .job-health-dot{background:#dc2626;box-shadow:0 0 0 4px #fee2e2}.job-health.success .job-health-dot{background:#15805d}
+.jobmeta{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin:11px 0}.jobmetric{border:1px solid var(--line);border-radius:7px;background:#fff;padding:8px 9px}.jobmetric span{display:block;color:#7b8797;font-size:11px}.jobmetric b{display:block;margin-top:2px;color:#334155;font-size:13px;font-weight:600;font-variant-numeric:tabular-nums}.jobbar.indeterminate span{width:34%!important;animation:wpclean-slide 1.3s ease-in-out infinite}
+.error-summary{margin-top:12px;border:1px solid #efc9cf;background:#fff7f8;border-radius:9px;padding:13px;color:#852733}.error-summary h4{margin:0 0 5px;font-size:15px}.error-code{display:inline-flex;margin-bottom:7px;border-radius:5px;background:#fee2e2;color:#991b1b;padding:4px 7px;font:600 12px/1.2 Consolas,monospace}.error-summary p{margin:0 0 8px;font-size:13px;line-height:1.55}.error-recovery{border-top:1px solid #f3d4d8;padding-top:8px;color:#6d3037}.technical-details{margin-top:9px}.technical-details summary{cursor:pointer;font-size:12px;font-weight:600;color:#64748b}.technical-details pre{max-height:190px;overflow:auto;margin:8px 0 0;padding:9px;border-radius:6px;background:#111827;color:#cbd5e1;white-space:pre-wrap;word-break:break-word;font:11px/1.5 Consolas,monospace}
 .terminal-panel{border:1px solid #273244;border-radius:10px;background:#111827;overflow:hidden;box-shadow:0 8px 24px rgba(15,23,42,.08)}
-.terminal-head{height:48px;padding:0 14px;display:flex;align-items:center;justify-content:space-between;gap:12px;border-bottom:1px solid #2a3548;background:#172033;color:#e5e7eb}.terminal-title{display:flex;align-items:center;gap:9px;font-size:14px;font-weight:600;letter-spacing:.2px}.terminal-dot{width:8px;height:8px;border-radius:50%;background:#39c985}.terminal-meta{font-size:12px;color:#9ca9bb;font-weight:400}.terminal-copy{border:1px solid #3a465a;background:#202a3c;color:#dbe4f0;border-radius:6px;padding:6px 9px;font-size:12px;font-weight:500;cursor:pointer}.terminal-copy:hover{background:#29364a}.terminal-output{height:calc(100vh - 178px);min-height:560px;margin:0;padding:15px 16px;overflow:auto;white-space:pre-wrap;word-break:break-word;background:#0d1422;color:#cbd5e1;font:14px/1.58 Consolas,"Cascadia Mono","Courier New",monospace;scrollbar-color:#3b4a61 #111827}.terminal-empty{color:#718096}
+.terminal-head{min-height:56px;padding:8px 14px;display:flex;align-items:center;justify-content:space-between;gap:12px;border-bottom:1px solid #2a3548;background:#172033;color:#e5e7eb}.terminal-title{display:flex;align-items:center;gap:9px;font-size:14px;font-weight:600;letter-spacing:.2px}.terminal-dot{width:8px;height:8px;border-radius:50%;background:#39c985}.terminal-meta{font-size:12px;color:#9ca9bb;font-weight:400}.terminal-copy{border:1px solid #3a465a;background:#202a3c;color:#dbe4f0;border-radius:6px;padding:7px 10px;min-height:36px;font-size:12px;font-weight:500;cursor:pointer}.terminal-copy:hover{background:#29364a}.terminal-output{height:calc(100vh - 186px);min-height:560px;margin:0;padding:15px 16px;overflow:auto;white-space:pre-wrap;word-break:break-word;background:#0d1422;color:#cbd5e1;font:14px/1.58 Consolas,"Cascadia Mono","Courier New",monospace;scrollbar-color:#3b4a61 #111827}.terminal-line{display:block}.terminal-line-error{color:#fda4af}.terminal-line-pass{color:#86efac}.terminal-empty{color:#718096}
 .modalhead h2{font-size:24px}.modalhead p{font-size:15px}.field label{font-size:14px}.field input,.field select{font-size:16px}
 .hint{font-size:12px}.toast{font-size:14px}
 @media(max-width:1120px){.drawer{width:min(920px,98vw)}.detail-layout{grid-template-columns:1fr}.detail-right{position:relative;top:auto}.terminal-output{height:440px;min-height:360px}}
-@media(max-width:820px){.content{padding-left:14px;padding-right:14px}}
+@media(max-width:820px){.content{padding-left:14px;padding-right:14px}.jobmeta{grid-template-columns:repeat(2,minmax(0,1fr))}.system-health{display:none}}
+@keyframes wpclean-pulse{0%{box-shadow:0 0 0 0 rgba(22,163,74,.35)}70%{box-shadow:0 0 0 7px rgba(22,163,74,0)}100%{box-shadow:0 0 0 0 rgba(22,163,74,0)}}@keyframes wpclean-slide{0%{transform:translateX(-110%)}50%{transform:translateX(95%)}100%{transform:translateX(300%)}}@media(prefers-reduced-motion:reduce){*,*::before,*::after{scroll-behavior:auto!important;animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important}}
 </style>'''
 
 
 _DETAIL_JS = r'''
+state.logFollow=state.logFollow!==false;
+function logLineHtml(line){const text=String(line||''),cls=/ERROR|\[[A-Z][A-Z0-9-]+-\d{3}\]/.test(text)?' terminal-line-error':/PASS|Hoàn tất|thành công/i.test(text)?' terminal-line-pass':'';return `<span class="terminal-line${cls}">${esc(text)}</span>`}
 function terminalPanelHtml(p){
   const j=p.job||{};
   const logs=Array.isArray(j.logs)?j.logs:[];
-  const status=j.status==='running'?'Đang chạy':j.status==='error'?'Có lỗi':j.status==='needs-action'?'Chờ xác nhận':j.status==='paused'?'Tạm dừng':j.status==='success'?'Hoàn tất':'Sẵn sàng';
-  const body=logs.length?logs.map(x=>esc(x)).join('\n'):'Chưa có log trong phiên GUI này. Nhấn Tiếp tục để bắt đầu xử lý.';
-  return `<div class="terminal-panel"><div class="terminal-head"><div><div class="terminal-title"><span class="terminal-dot"></span>LOG XỬ LÝ</div><div class="terminal-meta">${esc(status)} · ${logs.length} dòng gần nhất</div></div><button class="terminal-copy" type="button" onclick="copyTerminalLog()">Sao chép log</button></div><pre id="terminalOutput" class="terminal-output ${logs.length?'':'terminal-empty'}">${body}</pre></div>`;
+  const status=j.healthLabel||(j.status==='running'?'Đang chạy':j.status==='error'?'Có lỗi':j.status==='needs-action'?'Chờ xác nhận':j.status==='paused'?'Tạm dừng':j.status==='success'?'Hoàn tất':'Sẵn sàng');
+  const body=logs.length?logs.map(logLineHtml).join(''):'Chưa có log trong phiên GUI này. Nhấn Tiếp tục để bắt đầu xử lý.';
+  const signal=j.updatedAt?` · ${formatSignal(j.idleSeconds)}`:'';
+  return `<div class="terminal-panel"><div class="terminal-head"><div><div class="terminal-title"><span class="terminal-dot"></span>PROJECT LOG</div><div class="terminal-meta">${esc(status)}${signal} · ${logs.length} dòng</div></div><div class="terminal-tools"><button id="terminalFollow" class="terminal-copy" type="button" onclick="toggleTerminalFollow()">Tự cuộn: ${state.logFollow?'Bật':'Tắt'}</button><button class="terminal-copy" type="button" onclick="copyTerminalLog()">Sao chép</button></div></div><pre id="terminalOutput" class="terminal-output ${logs.length?'':'terminal-empty'}" role="log" aria-live="polite" aria-relevant="additions text">${body}</pre></div>`;
 }
+function scrollTerminalBottom(){const out=qs('#terminalOutput');if(out)out.scrollTop=out.scrollHeight}
+function toggleTerminalFollow(){state.logFollow=!state.logFollow;const button=qs('#terminalFollow');if(button)button.textContent=`Tự cuộn: ${state.logFollow?'Bật':'Tắt'}`;if(state.logFollow)scrollTerminalBottom()}
 async function copyTerminalLog(){
   const el=qs('#terminalOutput');
   if(!el)return;
@@ -60,8 +68,8 @@ async function copyTerminalLog(){
 renderDrawer=function(p){
   state.selected=p.name;
   const pc=progressOf(p);
-  qs('#drawerContent').innerHTML=`<div class="drawer-head"><div class="drawer-title"><div><h2>${esc(p.host)}</h2><p>${esc(p.name)} · ${pc}% hoàn tất</p></div><button class="xbtn" onclick="closePanels()">×</button></div></div><div class="drawer-body"><div class="detail-layout"><div class="detail-left"><div class="section"><div class="section-head"><div class="section-title">Kết nối FTP</div></div>${connectionHtml(p)}</div><div class="section"><div class="section-head"><div class="section-title">Tiến độ xử lý</div></div><div class="steps">${stepHtml(p)}</div>${jobHtml(p)}${decisionHtml(p)}</div>${p.themeRepair?`<div class="section"><button class="btn btn-warning" onclick="openRepair('${esc(p.name)}')">Mở thư mục theme repair</button></div>`:''}<div class="foot-danger"><p>Xóa dự án chỉ xóa dữ liệu local, không đụng hosting.</p>${p.completed?`<button class="btn btn-danger" onclick="deleteProject('${esc(p.name)}')">Xóa dự án local</button>`:''}</div></div><div class="detail-right">${terminalPanelHtml(p)}</div></div></div>`;
-  setTimeout(()=>{const out=qs('#terminalOutput');if(out)out.scrollTop=out.scrollHeight},0);
+  qs('#drawerContent').innerHTML=`<div class="drawer-head"><div class="drawer-title"><div><h2>${esc(p.host)}</h2><p>${esc(p.name)} · ${pc}% hoàn tất</p></div><button class="xbtn" type="button" aria-label="Đóng chi tiết dự án" onclick="closePanels()">×</button></div></div><div class="drawer-body"><div class="detail-layout"><div class="detail-left"><div class="section"><div class="section-head"><div class="section-title">Kết nối FTP</div></div>${connectionHtml(p)}</div><div class="section"><div class="section-head"><div class="section-title">Tiến độ xử lý</div></div><div class="steps">${stepHtml(p)}</div>${jobHtml(p)}${decisionHtml(p)}</div>${p.themeRepair?`<div class="section"><button class="btn btn-warning" onclick="openRepair('${esc(p.name)}')">Mở thư mục theme repair</button></div>`:''}${p.completed?`<div class="foot-danger"><button class="btn btn-danger" onclick="deleteProject('${esc(p.name)}')">Xóa dự án local</button></div>`:''}</div><div class="detail-right">${terminalPanelHtml(p)}</div></div></div>`;
+  if(state.logFollow)setTimeout(scrollTerminalBottom,0);
 }
 '''
 
@@ -76,34 +84,9 @@ def _render_app(token: str) -> str:
         "${esc(c.password||'Chưa có')}",
     )
     html = html.replace("qs('#e_password').value='';", "qs('#e_password').value=c.password||'';")
-    html = html.replace(
-        "Đổi tài khoản, mật khẩu, port hoặc remote path. Mật khẩu để trống sẽ giữ nguyên mật khẩu đang lưu.",
-        "Đổi tài khoản, mật khẩu, port hoặc remote path. Mật khẩu FTP được hiển thị trực tiếp vì giao diện chỉ chạy local trên máy này.",
-    )
     html = html.replace('placeholder="Để trống nếu không đổi"', 'placeholder="Mật khẩu FTP"')
     html = html.replace("</head>", _READABILITY_CSS + "\n</head>", 1)
     return html.replace("</script>\n</body>", _DETAIL_JS + "\n</script>\n</body>", 1)
-
-
-def _job_log(self, text: str) -> None:
-    clean = _ANSI_RE.sub("", str(text)).replace("\r", "\n")
-    lines = clean.splitlines() or [clean]
-    for raw in lines:
-        line = raw.strip()
-        if not line:
-            continue
-        if not re.match(r"^\[\d{2}:\d{2}:\d{2}\]", line):
-            line = f"[{datetime.now().strftime('%H:%M:%S')}] {line}"
-        self.logs.append(line)
-    if len(self.logs) > 500:
-        self.logs = self.logs[-500:]
-    self.touch()
-
-
-def _job_to_dict(self) -> dict[str, Any]:
-    payload = _ORIGINAL_JOB_TO_DICT(self)
-    payload["logs"] = self.logs[-300:]
-    return payload
 
 
 class _GuiTerminalStream:
@@ -155,12 +138,25 @@ def _progress_with_terminal_log(job, event: dict[str, Any]) -> None:
     if not phase:
         return
     bucket = (int(job.percent) // 10) * 10
-    key = f"{phase}:{bucket}"
+    attempt = int(event.get("attempt") or 0)
+    key = f"{phase}:{bucket}:{attempt}"
     if getattr(job, "_gui_progress_log_key", "") == key:
         return
     setattr(job, "_gui_progress_log_key", key)
-    current = str(event.get("current") or event.get("stage") or "").strip()
+    current = str(
+        event.get("current")
+        or event.get("current_file")
+        or event.get("current_dir")
+        or event.get("remote_path")
+        or event.get("file")
+        or event.get("stage")
+        or ""
+    ).strip()
     suffix = f" · {bucket}%" if bucket else ""
+    if job.total_items:
+        suffix += f" · {job.completed_items}/{job.total_items} {job.progress_unit or 'file'}"
+    if attempt:
+        suffix += f" · retry {attempt}/{event.get('max_attempts') or '?'}"
     if current:
         suffix += f" · {current}"
     job.log(f"{job.message or phase}{suffix}")
@@ -333,8 +329,6 @@ def _delete_project_local(name: str, confirmation: str) -> None:
 
 
 gui_ui.render_app = _render_app
-server.GuiJob.log = _job_log
-server.GuiJob.to_dict = _job_to_dict
 server._progress = _progress_with_terminal_log
 server._run_pipeline = _run_pipeline_with_terminal
 server._project_payload = _project_payload

@@ -11,12 +11,12 @@ internal static class WPCleanLauncher
         try
         {
             string root = AppDomain.CurrentDomain.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-            string script = Path.Combine(root, "giaodien.ps1");
+            string launcher = Path.Combine(root, "GIAODIEN.bat");
 
-            if (!File.Exists(script))
+            if (!File.Exists(launcher))
             {
                 MessageBox.Show(
-                    "Không tìm thấy giaodien.ps1 cạnh WP-Clean-Rebuild.exe.\n\nHãy đặt file EXE trong thư mục gốc của WP Clean Rebuild rồi chạy lại.",
+                    "Khong tim thay GIAODIEN.bat canh WP-Clean-Rebuild.exe.\n\nHay dat file EXE trong thu muc goc cua WP Clean Rebuild roi chay lai.",
                     "WP Clean Rebuild",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Error
@@ -26,8 +26,8 @@ internal static class WPCleanLauncher
 
             var startInfo = new ProcessStartInfo
             {
-                FileName = "powershell.exe",
-                Arguments = "-NoProfile -ExecutionPolicy Bypass -File \"" + script + "\"",
+                FileName = "cmd.exe",
+                Arguments = "/d /c \"\"" + launcher + "\"\"",
                 WorkingDirectory = root,
                 UseShellExecute = true,
                 WindowStyle = ProcessWindowStyle.Normal
@@ -38,7 +38,7 @@ internal static class WPCleanLauncher
         catch (Exception ex)
         {
             MessageBox.Show(
-                "Không thể khởi động WP Clean Rebuild.\n\n" + ex.Message,
+                "Khong the khoi dong WP Clean Rebuild.\n\n" + ex.Message,
                 "WP Clean Rebuild",
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Error

@@ -149,6 +149,37 @@ def _verify_standard_user_schema(sql_path: Path, prefix: str) -> None:
         raise ValueError("wp_usermeta schema is non-standard; refusing to inject an assumed row layout.")
 
 
+def _copy_upload_file_resilient(path: Path, target: Path, relative: Path) -> None:
+    """Copy one clean upload, tolerating a transient Windows path race once.
+
+    Antivirus software can inspect/quarantine files in the backup directory while
+    clean staging is being built. If the source still exists, recreate the target
+    parent and retry once. If the source itself disappeared, stop with an operator-
+    friendly integrity error instead of silently producing an incomplete restore.
+    """
+    for attempt in range(2):
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(path, target)
+            return
+        except FileNotFoundError as exc:
+            if not path.is_file():
+                rel = relative.as_posix()
+                raise RuntimeError(
+                    f"File backup đã biến mất khi tạo dữ liệu sạch: uploads/{rel}. "
+                    "Có thể antivirus đã cách ly/xóa file trong thư mục backups. "
+                    "Backup gốc không còn nguyên vẹn; hãy khôi phục file từ quarantine "
+                    "hoặc chạy backup lại rồi bấm Thử lại."
+                ) from exc
+            if attempt == 0:
+                continue
+            rel = relative.as_posix()
+            raise RuntimeError(
+                f"Windows không tạo được đường dẫn clean staging cho uploads/{rel}. "
+                "File nguồn vẫn tồn tại; hãy kiểm tra quyền ghi local, antivirus hoặc giới hạn đường dẫn rồi thử lại."
+            ) from exc
+
+
 def _copy_clean_uploads(source: Path, destination: Path) -> tuple[int, list[dict[str, str]]]:
     findings = scan_uploads(source)
     drop_reasons: dict[Path, str] = {}
@@ -183,8 +214,7 @@ def _copy_clean_uploads(source: Path, destination: Path) -> tuple[int, list[dict
             continue
 
         target = destination / relative
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(path, target)
+        _copy_upload_file_resilient(path, target, relative)
         copied += 1
 
     return copied, dropped

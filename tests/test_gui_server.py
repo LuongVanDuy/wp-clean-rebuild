@@ -70,13 +70,19 @@ def test_windows_one_click_launcher_is_committed() -> None:
     root = Path(__file__).resolve().parents[1]
     launcher = root / "WP-Clean-Rebuild.exe"
     source = root / "launcher" / "WPCleanLauncher.cs"
+    batch = root / "GIAODIEN.bat"
 
     assert launcher.is_file()
     assert launcher.stat().st_size > 1024
     assert source.is_file()
+    assert batch.is_file()
     source_text = source.read_text(encoding="utf-8")
-    assert "giaodien.ps1" in source_text
-    assert "powershell.exe" in source_text
+    batch_text = batch.read_text(encoding="utf-8-sig")
+    assert "GIAODIEN.bat" in source_text
+    assert "giaodien.ps1" not in source_text
+    assert "cmd.exe" in source_text
+    assert 'set "PYTHONUTF8=1"' in batch_text
+    assert 'set "PYTHONIOENCODING=utf-8:replace"' in batch_text
 
 
 def test_gui_terminal_stream_captures_stdout_and_keeps_history() -> None:

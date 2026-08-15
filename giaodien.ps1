@@ -145,5 +145,6 @@ ThanhCong 'Môi trường chạy đã đầy đủ.'
 
 Buoc 'BƯỚC 2 - Mở giao diện local'
 Write-Host 'Trình duyệt sẽ tự mở. Giữ cửa sổ này chạy trong lúc sử dụng giao diện.' -ForegroundColor Cyan
+# gui_ftp_logging_entry bọc production GUI trước đây chạy trực tiếp bằng: python -m wpclean.gui_no_fresh_entry
 & $uvExe run python -m wpclean.gui_ftp_logging_entry
 exit $LASTEXITCODE

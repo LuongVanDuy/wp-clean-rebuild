@@ -11,6 +11,13 @@ def test_common_failures_have_stable_codes_and_vietnamese_recovery() -> None:
     auth = classify_exception(RuntimeError("530 Login authentication failed"), stage="ftp-test")
     timeout = classify_exception(TimeoutError("WinError 10060"), stage="ftp-test")
     permission = classify_exception(PermissionError("550 Permission denied"), stage="rebuild")
+    reset = classify_exception(
+        RuntimeError(
+            "FTP delete failed after 5 attempts: /public_html/403.php "
+            "(ConnectionResetError: [WinError 10054] forcibly closed by the remote host)"
+        ),
+        stage="rebuild",
+    )
 
     assert auth.code == "FTP-AUTH-001"
     assert "mật khẩu" in auth.message
@@ -18,6 +25,8 @@ def test_common_failures_have_stable_codes_and_vietnamese_recovery() -> None:
     assert timeout.code == "FTP-TIMEOUT-001"
     assert permission.code == "FTP-PERM-001"
     assert "wipe" in permission.recovery
+    assert reset.code == "FTP-RESET-001"
+    assert "FTP daemon" in reset.recovery
 
 
 def test_api_error_payload_is_structured() -> None:

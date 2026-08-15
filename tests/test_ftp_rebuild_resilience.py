@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from wpclean import rebuild_execute
 from wpclean.ftp_rebuild_resilience import _is_transient_ftp_error, wipe_remote_root_with_reconnect
 
@@ -13,6 +15,8 @@ class ResetState:
         self.uploaded: dict[str, bytes] = {}
         self.reset_delete_once = True
         self.reset_upload_once = True
+        self.delete_before_reset = False
+        self.delete_calls: list[str] = []
 
 
 class ResetClient:
@@ -21,8 +25,11 @@ class ResetClient:
         self.closed = False
 
     def delete(self, path: str):
+        self.state.delete_calls.append(path)
         if self.state.reset_delete_once:
             self.state.reset_delete_once = False
+            if self.state.delete_before_reset:
+                self.state.deleted = True
             raise ConnectionResetError(10054, "An existing connection was forcibly closed by the remote host")
         self.state.deleted = True
         return "250 deleted"
@@ -91,6 +98,7 @@ def test_wipe_reconnects_after_winerror_10054_and_continues() -> None:
     assert dirs == 0
     assert preserved == []
     assert state.deleted is True
+    assert state.delete_calls == ["index.php", "index.php"]
     assert len(transport.clients) >= 2
     assert any(event.get("phase") == "ftp_reconnect" for event in events)
     assert any(event.get("phase") == "wipe_inventory_complete" for event in events)
@@ -130,3 +138,52 @@ def test_connection_reset_is_transient_but_login_error_is_not() -> None:
         ConnectionResetError(10054, "An existing connection was forcibly closed by the remote host")
     )
     assert not _is_transient_ftp_error(RuntimeError("530 Login authentication failed"))
+
+
+def test_wipe_verifies_ambiguous_delete_before_sending_it_again() -> None:
+    state = ResetState()
+    state.reset_upload_once = False
+    state.delete_before_reset = True
+    transport = ResetTransport(state)
+
+    files, dirs, preserved = wipe_remote_root_with_reconnect(
+        transport,  # type: ignore[arg-type]
+        "/public_html",
+    )
+
+    assert (files, dirs, preserved) == (1, 0, [])
+    assert state.delete_calls == ["index.php"]
+
+
+class UnsafeListingTransport(ResetTransport):
+    def _mlsd(self, client, path: str):
+        if path == "/public_html":
+            return iter([("../outside.php", {"type": "file", "size": "5"})])
+        return iter([])
+
+
+def test_wipe_rejects_unsafe_names_returned_by_ftp_server() -> None:
+    state = ResetState()
+    state.reset_delete_once = False
+    transport = UnsafeListingTransport(state)
+
+    with pytest.raises(RuntimeError, match="không an toàn"):
+        wipe_remote_root_with_reconnect(
+            transport,  # type: ignore[arg-type]
+            "/public_html",
+        )
+
+    assert state.delete_calls == []
+
+
+def test_wipe_refuses_ftp_account_root() -> None:
+    state = ResetState()
+    transport = ResetTransport(state)
+
+    with pytest.raises(RuntimeError, match="Từ chối wipe FTP root"):
+        wipe_remote_root_with_reconnect(
+            transport,  # type: ignore[arg-type]
+            "/",
+        )
+
+    assert transport.clients == []

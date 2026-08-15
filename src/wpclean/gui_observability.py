@@ -109,6 +109,25 @@ def classify_exception(exc: BaseException, *, stage: str = "") -> OperatorError:
             technical,
         )
 
+    if any(
+        marker in text
+        for marker in (
+            "winerror 10053",
+            "winerror 10054",
+            "connection reset",
+            "forcibly closed by the remote host",
+            "broken pipe",
+            "connection aborted",
+        )
+    ):
+        return _error(
+            "FTP-RESET-001",
+            "Hosting đã ngắt phiên FTP",
+            "Máy chủ FTP đóng kết nối trong lúc ứng dụng đang chờ phản hồi thao tác.",
+            "Ứng dụng đã thử kết nối lại và đổi cách gửi đường dẫn. Nếu vẫn lỗi, kiểm tra lệnh xóa bằng một FTP client hoặc yêu cầu hosting kiểm tra FTP daemon.",
+            technical,
+        )
+
     if "10060" in text or "timed out" in text or "timeout" in text:
         code = "FTP-TIMEOUT-001" if stage_key.startswith("ftp") or "ftp" in text else "NETWORK-TIMEOUT-001"
         return _error(

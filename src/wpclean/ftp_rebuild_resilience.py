@@ -97,8 +97,9 @@ class _ReconnectSession:
         *,
         path: str = "",
         missing_ok: bool = False,
+        attempts: int | None = None,
     ) -> _T | None:
-        max_attempts = _retry_count(self.transport)
+        max_attempts = max(1, int(attempts)) if attempts is not None else _retry_count(self.transport)
         last_error: BaseException | None = None
         for attempt in range(1, max_attempts + 1):
             try:
@@ -143,14 +144,206 @@ def _chmod(session: _ReconnectSession, path: str, mode: str) -> tuple[bool, str]
         return False, f"{type(exc).__name__}: {exc}"
 
 
+def _normalize_remote_path(path: str) -> str:
+    """Normalize an FTP path lexically without allowing it to climb above root."""
+    raw = str(path or "").strip().replace("\\", "/")
+    if any(ord(char) < 32 or ord(char) == 127 for char in raw):
+        raise RuntimeError(f"Đường dẫn FTP chứa ký tự điều khiển không an toàn: {path!r}")
+    absolute = raw.startswith("/")
+    parts: list[str] = []
+    for part in raw.split("/"):
+        if part in {"", "."}:
+            continue
+        if part == "..":
+            if not parts:
+                raise RuntimeError(f"Đường dẫn FTP không an toàn: {path}")
+            parts.pop()
+            continue
+        parts.append(part)
+    normalized = "/".join(parts)
+    return f"/{normalized}" if absolute else normalized
+
+
+def _assert_within_remote_root(remote_root: str, path: str, *, allow_root: bool = False) -> str:
+    root = _normalize_remote_path(remote_root)
+    candidate = _normalize_remote_path(path)
+    if root in {"", "/"}:
+        raise RuntimeError("Từ chối wipe FTP root rỗng hoặc '/'. Hãy cấu hình đúng thư mục WordPress.")
+
+    root_path = PurePosixPath(root)
+    candidate_path = PurePosixPath(candidate)
+    try:
+        relative = candidate_path.relative_to(root_path)
+    except ValueError as exc:
+        raise RuntimeError(
+            f"Từ chối thao tác ngoài WordPress root {root}: {candidate}"
+        ) from exc
+    if not allow_root and str(relative) in {"", "."}:
+        raise RuntimeError(f"Từ chối xóa trực tiếp WordPress root: {root}")
+    return candidate
+
+
+def _safe_child_path(remote_root: str, parent: str, name: str) -> str:
+    raw_name = str(name or "")
+    if (
+        raw_name in {"", ".", ".."}
+        or "/" in raw_name
+        or "\\" in raw_name
+        or any(ord(char) < 32 or ord(char) == 127 for char in raw_name)
+        or PurePosixPath(raw_name).name != raw_name
+    ):
+        raise RuntimeError(f"FTP trả về tên file không an toàn trong {parent}: {raw_name!r}")
+    child = str(PurePosixPath(parent) / raw_name)
+    return _assert_within_remote_root(remote_root, child)
+
+
+def _relative_remote_call(client, path: str, method: str):
+    """Run DELETE/RMD from the parent directory for strict FTP servers."""
+    remote = PurePosixPath(path)
+    parent = str(remote.parent)
+    name = remote.name
+    previous = None
+    try:
+        previous = client.pwd()
+    except Exception:
+        pass
+    client.cwd(parent)
+    try:
+        return getattr(client, method)(name)
+    finally:
+        if previous is not None:
+            try:
+                client.cwd(previous)
+            except Exception:
+                pass
+
+
+def _entry_exists(session: _ReconnectSession, path: str) -> bool:
+    remote = PurePosixPath(path)
+    parent = str(remote.parent)
+    name = remote.name
+    entries = session.call(
+        "verify-delete",
+        lambda client: list(session.transport._mlsd(client, parent)),
+        path=path,
+        missing_ok=True,
+    )
+    for entry_name, _facts in entries or []:
+        raw_name = str(entry_name)
+        if (
+            raw_name in {"", ".", ".."}
+            or "/" in raw_name
+            or "\\" in raw_name
+            or any(ord(char) < 32 or ord(char) == 127 for char in raw_name)
+        ):
+            raise RuntimeError(f"Không thể xác minh lệnh xóa vì FTP trả về tên không an toàn: {raw_name!r}")
+        if raw_name == name:
+            return True
+    return False
+
+
+def _emit_path_fallback(
+    session: _ReconnectSession,
+    *,
+    operation: str,
+    path: str,
+    error: BaseException,
+) -> None:
+    if session.progress:
+        session.progress(
+            {
+                "phase": "ftp_path_fallback",
+                "operation": operation,
+                "strategy": "absolute_path",
+                "current": path,
+                "error": f"{type(error).__name__}: {error}",
+            }
+        )
+
+
+def _remove_entry_compat(
+    session: _ReconnectSession,
+    path: str,
+    *,
+    method: str,
+    operation: str,
+) -> None:
+    """Remove one entry relative to its parent, with absolute-path fallback.
+
+    DirectAdmin/shared-hosting FTP daemons may accept MLSD with an absolute path
+    but reset the control socket on ``DELE /absolute/path``. Prefer the broadly
+    compatible ``CWD parent`` + ``DELE/RMD basename`` form proven by a live FTP
+    probe. An absolute path remains a fallback for servers that reject CWD.
+    """
+    relative_error: Exception | None = None
+    try:
+        session.call(
+            f"{operation}-relative",
+            lambda client: _relative_remote_call(client, path, method),
+            path=path,
+            missing_ok=True,
+            attempts=1,
+        )
+        return
+    except Exception as exc:
+        relative_error = exc
+        if _missing_error(exc):
+            return
+        if not (_is_transient_ftp_error(exc) or _permission_error(exc)):
+            raise
+
+    assert relative_error is not None
+
+    if _is_transient_ftp_error(relative_error):
+        # DELE/RMD may have completed before the reply socket was reset. Open a
+        # fresh control connection and verify before issuing another mutation.
+        try:
+            if session.progress:
+                session.progress(
+                    {
+                        "phase": "ftp_reconnect",
+                        "operation": operation,
+                        "current": path,
+                        "attempt": 2,
+                        "max_attempts": _retry_count(session.transport),
+                        "error": f"{type(relative_error).__name__}: {relative_error}",
+                    }
+                )
+            session.reconnect()
+            if not _entry_exists(session, path):
+                return
+        except Exception as verify_exc:
+            if not _is_transient_ftp_error(verify_exc):
+                raise
+            # The regular bounded retry below also renews a broken connection.
+
+        session.call(
+            f"{operation}-relative",
+            lambda client: _relative_remote_call(client, path, method),
+            path=path,
+            missing_ok=True,
+        )
+        return
+
+    _emit_path_fallback(session, operation=operation, path=path, error=relative_error)
+    session.call(
+        operation,
+        lambda client: getattr(client, method)(path),
+        path=path,
+        missing_ok=True,
+    )
+
+
 def _delete_file(
     session: _ReconnectSession,
     path: str,
     *,
+    remote_root: str,
     progress: ProgressCallback | None = None,
 ) -> None:
+    path = _assert_within_remote_root(remote_root, path)
     try:
-        session.call("delete", lambda client: client.delete(path), path=path, missing_ok=True)
+        _remove_entry_compat(session, path, method="delete", operation="delete")
         return
     except Exception as exc:
         if not _permission_error(exc):
@@ -178,7 +371,7 @@ def _delete_file(
                 }
             )
         try:
-            session.call("delete", lambda client: client.delete(path), path=path, missing_ok=True)
+            _remove_entry_compat(session, path, method="delete", operation="delete")
             return
         except Exception as retry_exc:
             if not _permission_error(retry_exc):
@@ -197,10 +390,12 @@ def _remove_dir(
     session: _ReconnectSession,
     path: str,
     *,
+    remote_root: str,
     progress: ProgressCallback | None = None,
 ) -> None:
+    path = _assert_within_remote_root(remote_root, path)
     try:
-        session.call("rmd", lambda client: client.rmd(path), path=path, missing_ok=True)
+        _remove_entry_compat(session, path, method="rmd", operation="rmd")
         return
     except Exception as exc:
         if not _permission_error(exc):
@@ -228,7 +423,7 @@ def _remove_dir(
                 }
             )
         try:
-            session.call("rmd", lambda client: client.rmd(path), path=path, missing_ok=True)
+            _remove_entry_compat(session, path, method="rmd", operation="rmd")
             return
         except Exception as retry_exc:
             if not _permission_error(retry_exc):
@@ -250,6 +445,7 @@ def wipe_remote_root_with_reconnect(
     progress: ProgressCallback | None = None,
 ) -> tuple[int, int, list[str]]:
     """Permission-aware, reconnect-safe destructive wipe."""
+    remote_root = _assert_within_remote_root(remote_root, remote_root, allow_root=True)
     session = _ReconnectSession(transport, progress=progress)
     deleted_files = 0
     deleted_dirs = 0
@@ -314,7 +510,7 @@ def wipe_remote_root_with_reconnect(
             if root and name == ".well-known":
                 preserved.append(str(PurePosixPath(path) / name))
                 continue
-            child = str(PurePosixPath(path) / name)
+            child = _safe_child_path(remote_root, path, name)
             kind = (facts.get("type") or "").lower()
             if kind in {"dir", "cdir", "pdir"}:
                 if kind == "dir":
@@ -360,11 +556,11 @@ def wipe_remote_root_with_reconnect(
             )
 
         for child in files_to_delete:
-            _delete_file(session, child, progress=progress)
+            _delete_file(session, child, remote_root=remote_root, progress=progress)
             deleted_files += 1
             emit(child)
         for child in dirs_to_delete:
-            _remove_dir(session, child, progress=progress)
+            _remove_dir(session, child, remote_root=remote_root, progress=progress)
             deleted_dirs += 1
             emit(child)
         remaining = [

@@ -462,7 +462,7 @@ def _confirm_answers(answers: list[bool]):
         typer.confirm = original
 
 
-_PROGRESS_SIDEBAND_PHASES = {"ftp_reconnect", "permission_recovery"}
+_PROGRESS_SIDEBAND_PHASES = {"ftp_reconnect", "ftp_path_fallback", "permission_recovery"}
 _REBUILD_PROGRESS_FIXED = {
     "verify_original": 1,
     "verify_clean": 3,
@@ -580,6 +580,7 @@ def _progress(job: GuiJob, event: dict[str, Any]) -> None:
         "wipe_inventory_complete": "Đã kiểm kê xong, chuẩn bị xóa code cũ",
         "wipe": "Đang xóa code cũ",
         "ftp_reconnect": "FTP tạm ngắt, đang kết nối lại",
+        "ftp_path_fallback": "FTP đang đổi cách gửi lệnh xóa",
         "permission_recovery": "Đang xử lý quyền file trên hosting",
         "db_import_upload": "Đang chuẩn bị import database",
         "db_import_execute": "Đang import database sạch",

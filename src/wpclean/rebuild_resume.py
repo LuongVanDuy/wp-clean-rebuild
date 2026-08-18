@@ -15,6 +15,7 @@ from .backup import verify_manifest
 from .rebuild_execute import (
     _database_import_bridge,
     _delete_remote_file,
+    _read_remote_import_checkpoint,
     _upload_file,
     _upload_text,
 )
@@ -145,11 +146,12 @@ def import_database_with_diagnostics(
         if progress:
             progress({"phase": "db_import_execute", "url": bridge_url})
         batch = 0
-        empty_500_retries = 0
-        last_checkpoint = (-1, -1)
+        checkpoint_wait_retries = 0
+        max_checkpoint_wait_retries = 10
+        last_checkpoint = (0, 0)
         while True:
             request = Request(
-                f"{bridge_url}?batch={batch}&retry={empty_500_retries}",
+                f"{bridge_url}?batch={batch}&retry={checkpoint_wait_retries}",
                 headers={
                     "User-Agent": "WP-Clean-Rebuild/0.6",
                     "X-WPClean-Token": token,
@@ -163,19 +165,47 @@ def import_database_with_diagnostics(
                     raw = response.read()
             except HTTPError as exc:
                 body = exc.read()
-                if 500 <= exc.code < 600 and not body.strip() and empty_500_retries < 3:
-                    empty_500_retries += 1
-                    if progress:
-                        progress(
-                            {
-                                "phase": "db_import_retry",
-                                "attempt": empty_500_retries,
-                                "max_attempts": 3,
-                                "current": "Hosting ngắt request; tiếp tục từ checkpoint",
-                            }
+                if 500 <= exc.code < 600 and not body.strip():
+                    time.sleep(0.75)
+                    state = _read_remote_import_checkpoint(transport, remote_state)
+                    if state is not None:
+                        checkpoint = (
+                            int(state.get("offset", 0)),
+                            int(state.get("statements", 0)),
                         )
-                    time.sleep(float(empty_500_retries))
-                    continue
+                        if checkpoint > last_checkpoint or bool(state.get("done")):
+                            statements = checkpoint[1]
+                            total_bytes = int(state.get("total_bytes", 0))
+                            if progress:
+                                progress(
+                                    {
+                                        "phase": "db_import_execute",
+                                        "items_completed": statements,
+                                        "bytes_completed": checkpoint[0],
+                                        "bytes_total": total_bytes,
+                                        "current": f"Đã import {statements} câu SQL",
+                                    }
+                                )
+                            last_checkpoint = checkpoint
+                            checkpoint_wait_retries = 0
+                            if state.get("done"):
+                                break
+                            batch += 1
+                            continue
+
+                    checkpoint_wait_retries += 1
+                    if checkpoint_wait_retries <= max_checkpoint_wait_retries:
+                        if progress:
+                            progress(
+                                {
+                                    "phase": "db_import_retry",
+                                    "attempt": checkpoint_wait_retries,
+                                    "max_attempts": max_checkpoint_wait_retries,
+                                    "current": "Hosting ngắt request; đang kiểm tra checkpoint FTP",
+                                }
+                            )
+                        time.sleep(float(min(checkpoint_wait_retries, 3)))
+                        continue
                 raise RuntimeError(
                     "Database import bridge failed: "
                     + _bridge_error_detail(body, status=exc.code)
@@ -213,7 +243,7 @@ def import_database_with_diagnostics(
             if checkpoint <= last_checkpoint:
                 raise RuntimeError("Database import bridge did not advance its checkpoint.")
             last_checkpoint = checkpoint
-            empty_500_retries = 0
+            checkpoint_wait_retries = 0
             batch += 1
             if batch > 10000:
                 raise RuntimeError("Database import exceeded the safe batch request limit.")

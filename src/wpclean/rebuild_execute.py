@@ -600,7 +600,12 @@ while (($line = fgets($fh)) !== false) {
         $batchStatements++;
         $offset = (int) ftell($fh);
         $statement = '';
-        $state = array('offset' => $offset, 'statements' => $statements, 'done' => false);
+        $state = array(
+            'offset' => $offset,
+            'statements' => $statements,
+            'done' => false,
+            'total_bytes' => (int) $totalBytes,
+        );
         if (!save_state($statePath, $state)) {
             fclose($fh);
             $db->close();
@@ -637,7 +642,12 @@ if (trim($statement) !== '') {
 }
 $offset = (int) ftell($fh);
 fclose($fh);
-$state = array('offset' => $offset, 'statements' => $statements, 'done' => true);
+$state = array(
+    'offset' => $offset,
+    'statements' => $statements,
+    'done' => true,
+    'total_bytes' => (int) $totalBytes,
+);
 if (!save_state($statePath, $state)) {
     $db->close();
     respond(false, 'failed to save final database import checkpoint', array('offset' => $offset), 500);
@@ -651,6 +661,43 @@ respond(true, 'database import completed', array(
     'batch_statements' => $batchStatements,
 ));
 '''.replace('__TOKEN__', token).replace('__DATA__', data_name).replace('__STATE__', state_name)
+
+
+def _read_remote_import_checkpoint(
+    transport: FTPTransport,
+    remote_state: str,
+    *,
+    attempts: int = 3,
+) -> dict[str, object] | None:
+    """Read the atomic import checkpoint over a fresh FTP connection."""
+    for attempt in range(max(1, attempts)):
+        client = None
+        try:
+            client = transport._new_client()
+            buffer = io.BytesIO()
+            client.retrbinary(
+                f"RETR {remote_state}",
+                buffer.write,
+                blocksize=transport.config.block_size,
+            )
+            payload = json.loads(buffer.getvalue().decode("utf-8"))
+            if (
+                isinstance(payload, dict)
+                and payload.get("offset") is not None
+                and payload.get("statements") is not None
+            ):
+                return payload
+        except Exception:
+            pass
+        finally:
+            if client is not None:
+                try:
+                    client.quit()
+                except Exception:
+                    client.close()
+        if attempt + 1 < attempts:
+            time.sleep(0.25)
+    return None
 
 
 def _import_database(
@@ -701,11 +748,12 @@ def _import_database(
         if progress:
             progress({"phase": "db_import_execute"})
         batch = 0
-        empty_500_retries = 0
-        last_checkpoint = (-1, -1)
+        checkpoint_wait_retries = 0
+        max_checkpoint_wait_retries = 10
+        last_checkpoint = (0, 0)
         while True:
             request = Request(
-                f"{bridge_url}?batch={batch}&retry={empty_500_retries}",
+                f"{bridge_url}?batch={batch}&retry={checkpoint_wait_retries}",
                 headers={
                     "User-Agent": "WP-Clean-Rebuild/0.6",
                     "X-WPClean-Token": token,
@@ -719,19 +767,47 @@ def _import_database(
                     raw = response.read()
             except HTTPError as exc:
                 body = exc.read()
-                if 500 <= exc.code < 600 and not body.strip() and empty_500_retries < 3:
-                    empty_500_retries += 1
-                    if progress:
-                        progress(
-                            {
-                                "phase": "db_import_retry",
-                                "attempt": empty_500_retries,
-                                "max_attempts": 3,
-                                "current": "Hosting ngắt request; tiếp tục từ checkpoint",
-                            }
+                if 500 <= exc.code < 600 and not body.strip():
+                    time.sleep(0.75)
+                    state = _read_remote_import_checkpoint(transport, remote_state)
+                    if state is not None:
+                        checkpoint = (
+                            int(state.get("offset", 0)),
+                            int(state.get("statements", 0)),
                         )
-                    time.sleep(float(empty_500_retries))
-                    continue
+                        if checkpoint > last_checkpoint or bool(state.get("done")):
+                            statements = checkpoint[1]
+                            total_bytes = int(state.get("total_bytes", 0))
+                            if progress:
+                                progress(
+                                    {
+                                        "phase": "db_import_execute",
+                                        "items_completed": statements,
+                                        "bytes_completed": checkpoint[0],
+                                        "bytes_total": total_bytes,
+                                        "current": f"Đã import {statements} câu SQL",
+                                    }
+                                )
+                            last_checkpoint = checkpoint
+                            checkpoint_wait_retries = 0
+                            if state.get("done"):
+                                break
+                            batch += 1
+                            continue
+
+                    checkpoint_wait_retries += 1
+                    if checkpoint_wait_retries <= max_checkpoint_wait_retries:
+                        if progress:
+                            progress(
+                                {
+                                    "phase": "db_import_retry",
+                                    "attempt": checkpoint_wait_retries,
+                                    "max_attempts": max_checkpoint_wait_retries,
+                                    "current": "Hosting ngắt request; đang kiểm tra checkpoint FTP",
+                                }
+                            )
+                        time.sleep(float(min(checkpoint_wait_retries, 3)))
+                        continue
                 detail = body.decode("utf-8", errors="replace").strip() or "empty response body"
                 raise RuntimeError(f"Database import bridge failed: HTTP {exc.code}: {detail}") from exc
 
@@ -764,7 +840,7 @@ def _import_database(
             if checkpoint <= last_checkpoint:
                 raise RuntimeError("Database import bridge did not advance its checkpoint.")
             last_checkpoint = checkpoint
-            empty_500_retries = 0
+            checkpoint_wait_retries = 0
             batch += 1
             if batch > 10000:
                 raise RuntimeError("Database import exceeded the safe batch request limit.")

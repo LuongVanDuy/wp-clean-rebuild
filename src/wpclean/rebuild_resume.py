@@ -6,6 +6,7 @@ import json
 from pathlib import Path, PurePosixPath
 import re
 import secrets
+import time
 from typing import Callable
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
@@ -23,7 +24,7 @@ from .transport import FTPTransport
 
 
 ProgressCallback = Callable[[dict], None]
-TEMP_IMPORT_NAME = re.compile(r"^wpclean-import-[0-9a-f]{16}\.(?:php|dat)$")
+TEMP_IMPORT_NAME = re.compile(r"^wpclean-import-[0-9a-f]{16}\.(?:php|dat|state(?:\.tmp)?)$")
 
 
 @dataclass(slots=True)
@@ -54,10 +55,14 @@ def _bridge_error_detail(body: bytes, *, status: int | None = None) -> str:
         parts.append(str(message))
     if payload.get("statement") is not None:
         parts.append(f"statement={payload.get('statement')}")
+    if payload.get("offset") is not None:
+        parts.append(f"offset={payload.get('offset')}")
     if payload.get("errno") is not None:
         parts.append(f"mysql_errno={payload.get('errno')}")
     if payload.get("error"):
         parts.append(f"mysql_error={payload.get('error')}")
+    if payload.get("line") is not None:
+        parts.append(f"php_line={payload.get('line')}")
     if not parts:
         parts.append(json.dumps(payload, ensure_ascii=False))
     prefix = f"HTTP {status}: " if status else ""
@@ -103,11 +108,14 @@ def import_database_with_diagnostics(
     nonce = secrets.token_hex(8)
     data_name = f"wpclean-import-{nonce}.dat"
     bridge_name = f"wpclean-import-{nonce}.php"
+    state_name = f"wpclean-import-{nonce}.state"
     remote_data = str(PurePosixPath(profile.remote_path) / data_name)
     remote_bridge = str(PurePosixPath(profile.remote_path) / bridge_name)
+    remote_state = str(PurePosixPath(profile.remote_path) / state_name)
     bridge_url = f"{profile.web_base_url}/{bridge_name}"
     bridge_removed = False
     data_removed = False
+    state_removed = False
     statements = 0
     execution_error: Exception | None = None
 
@@ -122,70 +130,121 @@ def import_database_with_diagnostics(
             )
             progress({"phase": "db_import_upload", "current": data_name})
         _upload_file(transport, remote_data, import_sql)
-    _upload_text(transport, remote_bridge, _database_import_bridge(token, data_name))
+    _upload_text(
+        transport,
+        remote_state,
+        json.dumps({"offset": 0, "statements": 0, "done": False}),
+    )
+    _upload_text(
+        transport,
+        remote_bridge,
+        _database_import_bridge(token, data_name, state_name),
+    )
 
     try:
         if progress:
             progress({"phase": "db_import_execute", "url": bridge_url})
-        request = Request(
-            bridge_url,
-            headers={
-                "User-Agent": "WP-Clean-Rebuild/0.5",
-                "X-WPClean-Token": token,
-                "Accept": "application/json",
-                "Cache-Control": "no-cache",
-            },
-            method="GET",
-        )
-        try:
-            with urlopen(request, timeout=900) as response:
-                raw = response.read()
-        except HTTPError as exc:
-            body = exc.read()
-            raise RuntimeError(
-                "Database import bridge failed: "
-                + _bridge_error_detail(body, status=exc.code)
-            ) from exc
-
-        try:
-            payload = json.loads(raw.decode("utf-8", errors="replace"))
-        except json.JSONDecodeError as exc:
-            raise RuntimeError(
-                "Database import bridge returned invalid JSON: "
-                + _bridge_error_detail(raw)
-            ) from exc
-        if not payload.get("ok"):
-            raise RuntimeError(
-                "Database import bridge failed: "
-                + _bridge_error_detail(raw)
+        batch = 0
+        empty_500_retries = 0
+        last_checkpoint = (-1, -1)
+        while True:
+            request = Request(
+                f"{bridge_url}?batch={batch}&retry={empty_500_retries}",
+                headers={
+                    "User-Agent": "WP-Clean-Rebuild/0.6",
+                    "X-WPClean-Token": token,
+                    "Accept": "application/json",
+                    "Cache-Control": "no-cache",
+                },
+                method="GET",
             )
-        statements = int(payload.get("statements", 0))
+            try:
+                with urlopen(request, timeout=180) as response:
+                    raw = response.read()
+            except HTTPError as exc:
+                body = exc.read()
+                if 500 <= exc.code < 600 and not body.strip() and empty_500_retries < 3:
+                    empty_500_retries += 1
+                    if progress:
+                        progress(
+                            {
+                                "phase": "db_import_retry",
+                                "attempt": empty_500_retries,
+                                "max_attempts": 3,
+                                "current": "Hosting ngắt request; tiếp tục từ checkpoint",
+                            }
+                        )
+                    time.sleep(float(empty_500_retries))
+                    continue
+                raise RuntimeError(
+                    "Database import bridge failed: "
+                    + _bridge_error_detail(body, status=exc.code)
+                ) from exc
+
+            try:
+                payload = json.loads(raw.decode("utf-8", errors="replace"))
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(
+                    "Database import bridge returned invalid JSON: "
+                    + _bridge_error_detail(raw)
+                ) from exc
+            if not payload.get("ok"):
+                raise RuntimeError(
+                    "Database import bridge failed: "
+                    + _bridge_error_detail(raw)
+                )
+
+            statements = int(payload.get("statements", 0))
+            offset = int(payload.get("offset", 0))
+            total_bytes = int(payload.get("total_bytes", 0))
+            checkpoint = (offset, statements)
+            if progress:
+                progress(
+                    {
+                        "phase": "db_import_execute",
+                        "items_completed": statements,
+                        "bytes_completed": offset,
+                        "bytes_total": total_bytes,
+                        "current": f"Đã import {statements} câu SQL",
+                    }
+                )
+            if payload.get("done"):
+                break
+            if checkpoint <= last_checkpoint:
+                raise RuntimeError("Database import bridge did not advance its checkpoint.")
+            last_checkpoint = checkpoint
+            empty_500_retries = 0
+            batch += 1
+            if batch > 10000:
+                raise RuntimeError("Database import exceeded the safe batch request limit.")
     except Exception as exc:
         execution_error = exc
     finally:
         bridge_removed = _delete_remote_file(transport, remote_bridge)
         data_removed = _delete_remote_file(transport, remote_data)
+        state_removed = _delete_remote_file(transport, remote_state)
         if progress:
             progress(
                 {
                     "phase": "db_import_cleanup",
                     "bridge_removed": bridge_removed,
                     "data_removed": data_removed,
+                    "state_removed": state_removed,
                 }
             )
 
-    cleanup_problem = not bridge_removed or not data_removed
+    cleanup_problem = not bridge_removed or not data_removed or not state_removed
     if execution_error is not None:
         if cleanup_problem:
             raise RuntimeError(
                 f"Database import failed ({execution_error}) and temporary import cleanup was incomplete: "
-                f"bridge_removed={bridge_removed}, data_removed={data_removed}"
+                f"bridge_removed={bridge_removed}, data_removed={data_removed}, state_removed={state_removed}"
             ) from execution_error
         raise execution_error
     if cleanup_problem:
         raise RuntimeError(
             "Database import completed but temporary import cleanup was incomplete: "
-            f"bridge_removed={bridge_removed}, data_removed={data_removed}"
+            f"bridge_removed={bridge_removed}, data_removed={data_removed}, state_removed={state_removed}"
         )
     return statements, bridge_removed, data_removed
 

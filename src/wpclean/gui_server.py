@@ -468,7 +468,12 @@ def _confirm_answers(answers: list[bool]):
         typer.confirm = original
 
 
-_PROGRESS_SIDEBAND_PHASES = {"ftp_reconnect", "ftp_path_fallback", "permission_recovery"}
+_PROGRESS_SIDEBAND_PHASES = {
+    "ftp_reconnect",
+    "ftp_path_fallback",
+    "permission_recovery",
+    "db_import_retry",
+}
 _REBUILD_PROGRESS_FIXED = {
     "verify_original": 1,
     "verify_clean": 3,
@@ -571,6 +576,9 @@ def _progress(job: GuiJob, event: dict[str, Any]) -> None:
     elif job.stage == "plugin" and phase == "upload_mu_plugin":
         ratio = min(1.0, completed / total) if total > 0 else 0.0
         percent = round(96 + (3 * ratio))
+    elif job.stage == "rebuild" and phase == "db_import_execute" and bytes_total:
+        ratio = min(1.0, bytes_completed / bytes_total)
+        percent = round(84 + (12 * ratio))
     elif job.stage == "rebuild" and phase:
         percent = _rebuild_progress_percent(phase, completed, total, job.percent)
     elif total:
@@ -608,6 +616,7 @@ def _progress(job: GuiJob, event: dict[str, Any]) -> None:
         "db_import_prepare": "Đang chuẩn hóa SQL cho MySQL",
         "db_import_upload": "Đang chuẩn bị import database",
         "db_import_execute": "Đang import database sạch",
+        "db_import_retry": "Hosting ngắt request, đang tiếp tục từ checkpoint",
         "db_import_cleanup": "Đang dọn file import tạm",
         "plugin_lookup": "Đang xác minh plugin đã chọn",
         "plugin_download": "Đang tải plugin sạch",

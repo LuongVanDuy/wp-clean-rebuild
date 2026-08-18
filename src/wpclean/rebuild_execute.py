@@ -7,6 +7,7 @@ from ftplib import error_perm
 from pathlib import Path, PurePosixPath
 from tempfile import TemporaryDirectory
 from typing import Callable
+from urllib.error import HTTPError
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 import hashlib
@@ -15,6 +16,7 @@ import json
 import re
 import secrets
 import threading
+import time
 import zipfile
 
 from .backup import verify_manifest
@@ -407,21 +409,75 @@ def _delete_remote_file(transport: FTPTransport, remote_path: str) -> bool:
             client.close()
 
 
-def _database_import_bridge(token: str, data_name: str) -> str:
+def _database_import_bridge(token: str, data_name: str, state_name: str | None = None) -> str:
+    state_name = state_name or data_name.rsplit(".", 1)[0] + ".state"
     return r'''<?php
 @set_time_limit(0);
 @ini_set('memory_limit', '256M');
 @ini_set('display_errors', '0');
+@ignore_user_abort(true);
 header('Content-Type: application/json; charset=utf-8');
 header('Cache-Control: no-store');
 
 const WPCLEAN_TOKEN = '__TOKEN__';
 const WPCLEAN_DATA = '__DATA__';
+const WPCLEAN_STATE = '__STATE__';
+const WPCLEAN_MAX_BATCH_STATEMENTS = 50;
+const WPCLEAN_MAX_BATCH_SECONDS = 8.0;
+
+$GLOBALS['wpclean_responded'] = false;
+
+function encode_payload($payload) {
+    $flags = defined('JSON_INVALID_UTF8_SUBSTITUTE') ? JSON_INVALID_UTF8_SUBSTITUTE : 0;
+    $encoded = json_encode($payload, $flags);
+    if ($encoded !== false) {
+        return $encoded;
+    }
+    return '{"ok":false,"message":"response encoding failed"}';
+}
 
 function respond($ok, $message, $extra = array(), $status = 200) {
+    $GLOBALS['wpclean_responded'] = true;
     http_response_code($status);
-    echo json_encode(array_merge(array('ok' => $ok, 'message' => $message), $extra));
+    echo encode_payload(array_merge(array('ok' => $ok, 'message' => $message), $extra));
     exit;
+}
+
+register_shutdown_function(function () {
+    if (!empty($GLOBALS['wpclean_responded'])) {
+        return;
+    }
+    $error = error_get_last();
+    if (!$error) {
+        return;
+    }
+    $fatal = array(E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR, E_USER_ERROR);
+    if (!in_array($error['type'], $fatal, true)) {
+        return;
+    }
+    http_response_code(500);
+    echo encode_payload(array(
+        'ok' => false,
+        'message' => 'PHP fatal during database import',
+        'error' => isset($error['message']) ? $error['message'] : 'unknown fatal error',
+        'line' => isset($error['line']) ? (int) $error['line'] : 0,
+    ));
+});
+
+function save_state($path, $state) {
+    $temporary = $path . '.tmp';
+    if (@file_put_contents($temporary, encode_payload($state), LOCK_EX) === false) {
+        return false;
+    }
+    if (@rename($temporary, $path)) {
+        return true;
+    }
+    @unlink($path);
+    if (@rename($temporary, $path)) {
+        return true;
+    }
+    @unlink($temporary);
+    return false;
 }
 
 $provided = isset($_SERVER['HTTP_X_WPCLEAN_TOKEN']) ? (string) $_SERVER['HTTP_X_WPCLEAN_TOKEN'] : '';
@@ -476,16 +532,54 @@ if ($db->connect_errno) {
 $db->set_charset('utf8mb4');
 
 $dataPath = __DIR__ . '/' . WPCLEAN_DATA;
+$statePath = __DIR__ . '/' . WPCLEAN_STATE;
 $fh = @fopen($dataPath, 'rb');
 if (!$fh) {
     respond(false, 'temporary SQL data is not readable', array(), 500);
 }
+if (!@flock($fh, LOCK_EX)) {
+    fclose($fh);
+    respond(false, 'failed to lock temporary SQL data', array(), 500);
+}
+
+$totalBytes = @filesize($dataPath);
+if ($totalBytes === false) {
+    fclose($fh);
+    respond(false, 'temporary SQL data size is unavailable', array(), 500);
+}
+$state = array('offset' => 0, 'statements' => 0, 'done' => false);
+if (is_file($statePath)) {
+    $rawState = @file_get_contents($statePath);
+    $loadedState = $rawState === false ? null : json_decode($rawState, true);
+    if (!is_array($loadedState) || !isset($loadedState['offset']) || !isset($loadedState['statements'])) {
+        fclose($fh);
+        respond(false, 'database import checkpoint is invalid', array(), 500);
+    }
+    $state = array_merge($state, $loadedState);
+}
+$offset = max(0, (int) $state['offset']);
+$statements = max(0, (int) $state['statements']);
+if (!empty($state['done'])) {
+    fclose($fh);
+    respond(true, 'database import completed', array(
+        'done' => true,
+        'statements' => $statements,
+        'offset' => $offset,
+        'total_bytes' => (int) $totalBytes,
+        'batch_statements' => 0,
+    ));
+}
+if ($offset > (int) $totalBytes || @fseek($fh, $offset, SEEK_SET) !== 0) {
+    fclose($fh);
+    respond(false, 'database import checkpoint offset is invalid', array('offset' => $offset), 500);
+}
 
 $statement = '';
-$statements = 0;
+$batchStatements = 0;
+$startedAt = microtime(true);
 while (($line = fgets($fh)) !== false) {
     $trim = ltrim($line);
-    if ($statement === '' && ($trim === '' || substr($trim, 0, 2) === '--' || substr($trim, 0, 1) === '#')) {
+    if ($statement === '' && (trim($trim) === '' || substr($trim, 0, 2) === '--' || substr($trim, 0, 1) === '#')) {
         continue;
     }
     $statement .= $line;
@@ -495,26 +589,68 @@ while (($line = fgets($fh)) !== false) {
             $errno = $db->errno;
             fclose($fh);
             $db->close();
-            respond(false, 'SQL import failed', array('statement' => $statements + 1, 'errno' => $errno, 'error' => $error), 500);
+            respond(false, 'SQL import failed', array(
+                'statement' => $statements + 1,
+                'errno' => $errno,
+                'error' => $error,
+                'offset' => $offset,
+            ), 500);
         }
         $statements++;
+        $batchStatements++;
+        $offset = (int) ftell($fh);
         $statement = '';
+        $state = array('offset' => $offset, 'statements' => $statements, 'done' => false);
+        if (!save_state($statePath, $state)) {
+            fclose($fh);
+            $db->close();
+            respond(false, 'failed to save database import checkpoint', array('offset' => $offset), 500);
+        }
+        if ($batchStatements >= WPCLEAN_MAX_BATCH_STATEMENTS || (microtime(true) - $startedAt) >= WPCLEAN_MAX_BATCH_SECONDS) {
+            fclose($fh);
+            $db->close();
+            respond(true, 'database import batch completed', array(
+                'done' => false,
+                'statements' => $statements,
+                'offset' => $offset,
+                'total_bytes' => (int) $totalBytes,
+                'batch_statements' => $batchStatements,
+            ));
+        }
     }
 }
-fclose($fh);
 
 if (trim($statement) !== '') {
     if (!$db->query($statement)) {
         $error = $db->error;
         $errno = $db->errno;
         $db->close();
-        respond(false, 'SQL import failed at trailing statement', array('statement' => $statements + 1, 'errno' => $errno, 'error' => $error), 500);
+        respond(false, 'SQL import failed at trailing statement', array(
+            'statement' => $statements + 1,
+            'errno' => $errno,
+            'error' => $error,
+            'offset' => $offset,
+        ), 500);
     }
     $statements++;
+    $batchStatements++;
+}
+$offset = (int) ftell($fh);
+fclose($fh);
+$state = array('offset' => $offset, 'statements' => $statements, 'done' => true);
+if (!save_state($statePath, $state)) {
+    $db->close();
+    respond(false, 'failed to save final database import checkpoint', array('offset' => $offset), 500);
 }
 $db->close();
-respond(true, 'database import completed', array('statements' => $statements));
-'''.replace('__TOKEN__', token).replace('__DATA__', data_name)
+respond(true, 'database import completed', array(
+    'done' => true,
+    'statements' => $statements,
+    'offset' => $offset,
+    'total_bytes' => (int) $totalBytes,
+    'batch_statements' => $batchStatements,
+));
+'''.replace('__TOKEN__', token).replace('__DATA__', data_name).replace('__STATE__', state_name)
 
 
 def _import_database(
@@ -528,11 +664,14 @@ def _import_database(
     nonce = secrets.token_hex(8)
     data_name = f"wpclean-import-{nonce}.dat"
     bridge_name = f"wpclean-import-{nonce}.php"
+    state_name = f"wpclean-import-{nonce}.state"
     remote_data = str(PurePosixPath(profile.remote_path) / data_name)
     remote_bridge = str(PurePosixPath(profile.remote_path) / bridge_name)
+    remote_state = str(PurePosixPath(profile.remote_path) / state_name)
     bridge_url = f"{profile.web_base_url}/{bridge_name}"
     bridge_removed = False
     data_removed = False
+    state_removed = False
     statements = 0
     execution_error: Exception | None = None
 
@@ -547,52 +686,116 @@ def _import_database(
             )
             progress({"phase": "db_import_upload", "current": data_name})
         _upload_file(transport, remote_data, import_sql)
-    _upload_text(transport, remote_bridge, _database_import_bridge(token, data_name))
+    _upload_text(
+        transport,
+        remote_state,
+        json.dumps({"offset": 0, "statements": 0, "done": False}),
+    )
+    _upload_text(
+        transport,
+        remote_bridge,
+        _database_import_bridge(token, data_name, state_name),
+    )
 
     try:
         if progress:
             progress({"phase": "db_import_execute"})
-        request = Request(
-            bridge_url,
-            headers={
-                "User-Agent": "WP-Clean-Rebuild/0.4",
-                "X-WPClean-Token": token,
-                "Accept": "application/json",
-                "Cache-Control": "no-cache",
-            },
-            method="GET",
-        )
-        with urlopen(request, timeout=900) as response:
-            payload = json.loads(response.read().decode("utf-8", errors="replace"))
-        if not payload.get("ok"):
-            raise RuntimeError(f"Database import bridge failed: {payload.get('message')}")
-        statements = int(payload.get("statements", 0))
+        batch = 0
+        empty_500_retries = 0
+        last_checkpoint = (-1, -1)
+        while True:
+            request = Request(
+                f"{bridge_url}?batch={batch}&retry={empty_500_retries}",
+                headers={
+                    "User-Agent": "WP-Clean-Rebuild/0.6",
+                    "X-WPClean-Token": token,
+                    "Accept": "application/json",
+                    "Cache-Control": "no-cache",
+                },
+                method="GET",
+            )
+            try:
+                with urlopen(request, timeout=180) as response:
+                    raw = response.read()
+            except HTTPError as exc:
+                body = exc.read()
+                if 500 <= exc.code < 600 and not body.strip() and empty_500_retries < 3:
+                    empty_500_retries += 1
+                    if progress:
+                        progress(
+                            {
+                                "phase": "db_import_retry",
+                                "attempt": empty_500_retries,
+                                "max_attempts": 3,
+                                "current": "Hosting ngắt request; tiếp tục từ checkpoint",
+                            }
+                        )
+                    time.sleep(float(empty_500_retries))
+                    continue
+                detail = body.decode("utf-8", errors="replace").strip() or "empty response body"
+                raise RuntimeError(f"Database import bridge failed: HTTP {exc.code}: {detail}") from exc
+
+            try:
+                payload = json.loads(raw.decode("utf-8", errors="replace"))
+            except json.JSONDecodeError as exc:
+                detail = " ".join(raw.decode("utf-8", errors="replace").split())[:1200]
+                raise RuntimeError(
+                    "Database import bridge returned invalid JSON: " + (detail or "empty response body")
+                ) from exc
+            if not payload.get("ok"):
+                raise RuntimeError(f"Database import bridge failed: {payload.get('message')}")
+
+            statements = int(payload.get("statements", 0))
+            offset = int(payload.get("offset", 0))
+            total_bytes = int(payload.get("total_bytes", 0))
+            checkpoint = (offset, statements)
+            if progress:
+                progress(
+                    {
+                        "phase": "db_import_execute",
+                        "items_completed": statements,
+                        "bytes_completed": offset,
+                        "bytes_total": total_bytes,
+                        "current": f"Đã import {statements} câu SQL",
+                    }
+                )
+            if payload.get("done"):
+                break
+            if checkpoint <= last_checkpoint:
+                raise RuntimeError("Database import bridge did not advance its checkpoint.")
+            last_checkpoint = checkpoint
+            empty_500_retries = 0
+            batch += 1
+            if batch > 10000:
+                raise RuntimeError("Database import exceeded the safe batch request limit.")
     except Exception as exc:
         execution_error = exc
     finally:
         bridge_removed = _delete_remote_file(transport, remote_bridge)
         data_removed = _delete_remote_file(transport, remote_data)
+        state_removed = _delete_remote_file(transport, remote_state)
         if progress:
             progress(
                 {
                     "phase": "db_import_cleanup",
                     "bridge_removed": bridge_removed,
                     "data_removed": data_removed,
+                    "state_removed": state_removed,
                 }
             )
 
-    cleanup_problem = not bridge_removed or not data_removed
+    cleanup_problem = not bridge_removed or not data_removed or not state_removed
     if execution_error is not None:
         if cleanup_problem:
             raise RuntimeError(
                 f"Database import failed ({execution_error}) and temporary import cleanup was incomplete: "
-                f"bridge_removed={bridge_removed}, data_removed={data_removed}"
+                f"bridge_removed={bridge_removed}, data_removed={data_removed}, state_removed={state_removed}"
             ) from execution_error
         raise execution_error
     if cleanup_problem:
         raise RuntimeError(
             "Database import completed but temporary import cleanup was incomplete: "
-            f"bridge_removed={bridge_removed}, data_removed={data_removed}"
+            f"bridge_removed={bridge_removed}, data_removed={data_removed}, state_removed={state_removed}"
         )
     return statements, bridge_removed, data_removed
 

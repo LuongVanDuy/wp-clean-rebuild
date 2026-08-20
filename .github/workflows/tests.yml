@@ -20,6 +20,25 @@ jobs:
       - run: pip install -e . pytest
       - run: pytest -q
 
+  linux-gui-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: python -m pip install --upgrade pip
+      - run: pip install -e .
+      - name: Validate Ubuntu launchers
+        shell: bash
+        run: bash -n install.sh START.sh wpclean.sh
+      - name: Run CLI doctor
+        run: wpclean doctor
+      - name: Import Ubuntu GUI runtime
+        run: python -c "import wpclean.linux_runtime_entry; print('Ubuntu GUI runtime import OK')"
+      - name: Compile production GUI modules
+        run: python -m py_compile src/wpclean/linux_runtime_entry.py src/wpclean/gui_runtime_entry.py src/wpclean/gui_stable_runtime_entry.py src/wpclean/gui_parallel_entry.py src/wpclean/gui_ftp_logging_entry.py src/wpclean/gui_server.py
+
   windows-gui-smoke:
     runs-on: windows-latest
     steps:

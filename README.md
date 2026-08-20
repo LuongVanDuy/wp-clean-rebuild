@@ -1,6 +1,6 @@
 # WP Clean Rebuild
 
-Local Windows GUI and technical CLI for rebuilding a compromised WordPress installation from trusted sources while preserving and triaging the database and uploads.
+Local Windows/Ubuntu GUI and technical CLI for rebuilding a compromised WordPress installation from trusted sources while preserving and triaging the database and uploads.
 
 ## Current status
 
@@ -51,6 +51,43 @@ git pull
 .\START.bat
 ```
 
+## Ubuntu — easiest setup
+
+Ubuntu uses the same Python engine and local browser GUI as Windows. The Linux launchers bootstrap an isolated Python 3.13 runtime with `uv`; you do not need to replace your system Python.
+
+On a fresh clone:
+
+```bash
+chmod +x install.sh START.sh wpclean.sh
+./START.sh
+```
+
+`START.sh` checks the runtime first. If `uv`, Python 3.13 or project dependencies are missing, it runs `install.sh` and asks before installing the missing runtime.
+
+The browser opens the local operator dashboard at `127.0.0.1`. Keep the terminal open while using the GUI.
+
+Technical CLI example:
+
+```bash
+./wpclean.sh doctor
+./wpclean.sh --help
+```
+
+The Ubuntu bootstrap downloads uv only from the official Astral installer at `https://astral.sh/uv/install.sh`. It requires either `curl` or `wget`.
+
+The GUI's **open repair folder** action uses `xdg-open`. Most Ubuntu desktop installs already include it; if not:
+
+```bash
+sudo apt install xdg-utils
+```
+
+### Update an existing clone
+
+```bash
+git pull
+./START.sh
+```
+
 ## Manual development setup
 
 For developers who already manage Python themselves:
@@ -78,6 +115,16 @@ With the Windows launcher:
 .\wpclean.bat scan-uploads .\wp-content\uploads
 .\wpclean.bat manifest .\backup
 .\wpclean.bat verify-backup .\backup
+```
+
+On Ubuntu, use the equivalent `./wpclean.sh` command:
+
+```bash
+./wpclean.sh doctor
+./wpclean.sh scan-sql database.sql
+./wpclean.sh scan-uploads ./wp-content/uploads
+./wpclean.sh manifest ./backup
+./wpclean.sh verify-backup ./backup
 ```
 
 ### Test FTP/FTPS
